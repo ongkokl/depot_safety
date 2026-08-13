@@ -16,7 +16,7 @@ AI MODEL:
 DATABASE:
 Cloudflare D1
 
-MAIN API:
+ENDPOINTS:
 
 GET  /api/health
 GET  /api/safety-checks
@@ -25,6 +25,8 @@ GET  /api/inspections/:id
 
 POST /api/analyze
 POST /api/analyse
+POST /api/analyze-photo
+POST /api/analyse-photo
 
 Vectorize is NOT required for this version.
 
@@ -133,7 +135,6 @@ function jsonResponse(
   return new Response(
     JSON.stringify(data),
     {
-
       status,
 
       headers: {
@@ -147,7 +148,6 @@ function jsonResponse(
         ...corsHeaders(),
 
       },
-
     }
   );
 }
@@ -155,7 +155,7 @@ function jsonResponse(
 
 /*
 ============================================================
-HELPERS
+GENERAL HELPERS
 ============================================================
 */
 
@@ -208,7 +208,10 @@ function clampConfidence(
 
   return Math.max(
     0,
-    Math.min(1, n)
+    Math.min(
+      1,
+      n
+    )
   );
 
 }
@@ -312,14 +315,7 @@ function normalizeCategory(
       .trim();
 
 
-  if (!text) {
-
-    return "Other";
-
-  }
-
-
-  return text;
+  return text || "Other";
 
 }
 
@@ -349,7 +345,7 @@ function normalizeImage(
 
 
   /*
-  Already data URL
+  Already a data URL.
   */
 
   if (
@@ -364,7 +360,7 @@ function normalizeImage(
 
 
   /*
-  HTTP URL
+  Image URL.
   */
 
   if (
@@ -382,7 +378,7 @@ function normalizeImage(
 
 
   /*
-  Raw base64
+  Raw Base64.
   */
 
   const mime =
@@ -409,7 +405,7 @@ function normalizeImage(
 
 /*
 ============================================================
-DATABASE COLUMNS
+DATABASE TABLE COLUMNS
 ============================================================
 */
 
@@ -439,7 +435,7 @@ async function getTableColumns(
   } catch (error) {
 
     console.error(
-      `Unable to read ${tableName}:`,
+      `Unable to read table ${tableName}:`,
       error
     );
 
@@ -453,7 +449,7 @@ async function getTableColumns(
 
 /*
 ============================================================
-LOAD SAFETY CHECKS
+LOAD WSH SAFETY CHECKS
 ============================================================
 */
 
@@ -518,9 +514,9 @@ function buildSafetyCheckText(
   ) {
 
     return `
-No active safety checks were found.
+No active safety checks were found in D1.
 
-Use only general visible workplace safety principles.
+Use general visible workplace safety principles only.
 
 Do not invent specific WSH requirements.
 `;
@@ -620,77 +616,68 @@ IMPORTANT SAFETY RULES:
 
 13. Confidence must be between 0 and 1.
 
-14. If no meaningful safety condition can be determined,
-    use CHECK_REQUIRED rather than inventing a problem.
+14. Do not assess equipment or areas that are not
+    sufficiently visible.
 
-EXAMPLES:
+15. Do not assume a vehicle, pedestrian route, crane,
+    scaffold, electrical system, fire equipment or
+    lifting operation is safe simply because it exists
+    in the background.
 
-A worker visibly wearing a hard hat:
-PPE may be PASS.
+16. If there is insufficient visual evidence,
+    use CHECK_REQUIRED.
 
-Do not conclude that all PPE requirements are satisfied.
+USE THIS FORMAT FOR EVERY FINDING:
 
-Visible oil/liquid on a working area:
-Housekeeping may be FAIL.
+* CATEGORY
 
-A vehicle and pedestrian visibly sharing an unsafe route:
-Vehicular Safety may be FAIL.
+Category: CATEGORY
+Title: TITLE
+Observation: OBSERVATION
+Status: PASS
+Risk Level: LOW
+Confidence: 0.90
+Check ID: CHECK-ID
+Source Title: SOURCE
+Source URL: URL
 
-A crane visible in the background:
-Do NOT automatically report a lifting failure.
+USE THESE CATEGORIES WHEN APPROPRIATE:
 
-A condition that needs physical verification:
-CHECK_REQUIRED.
+PPE
+Housekeeping
+Vehicular Safety
+Work at Height
+Lifting
+Electrical Equipment
+Fire Safety
+Storage
+People
+Process
+Equipment
 
-SAFETY CHECK LIBRARY:
+IMPORTANT:
+
+Only report observations supported by the photograph.
+
+Do not write a long narrative.
+
+Maximum 8 findings.
+
+After the findings, provide a short overall observation.
+
+WSH SAFETY CHECK LIBRARY:
 
 ${buildSafetyCheckText(checks)}
 
-RETURN ONLY JSON.
-
-The response MUST have exactly this general structure:
-
-{
-  "scene_summary": "Brief description of the visible scene.",
-  "findings": [
-    {
-      "category": "PPE",
-      "title": "Short finding title",
-      "observation": "What is visibly observed.",
-      "status": "PASS",
-      "risk_level": "LOW",
-      "confidence": 0.90,
-      "check_id": "matching safety check ID",
-      "source_title": "WSH source",
-      "source_url": "https://www.tal.sg/wshc"
-    }
-  ]
-}
-
-Allowed status values:
-
-PASS
-FAIL
-CHECK_REQUIRED
-
-Allowed risk values:
-
-LOW
-MEDIUM
-HIGH
-
-Do not return Markdown.
-Do not return bullet points.
-Do not return explanations outside JSON.
+END OF SAFETY CHECK LIBRARY.
 `;
-
 
 }
 
 
 /*
 ============================================================
-EXTRACT AI RESPONSE
+EXTRACT AI RESPONSE TEXT
 ============================================================
 */
 
@@ -725,8 +712,7 @@ function extractAIResponseText(
 
 
   if (
-    typeof obj.response ===
-    "string"
+    typeof obj.response === "string"
   ) {
 
     return obj.response;
@@ -735,8 +721,7 @@ function extractAIResponseText(
 
 
   if (
-    typeof obj.result ===
-    "string"
+    typeof obj.result === "string"
   ) {
 
     return obj.result;
@@ -745,8 +730,7 @@ function extractAIResponseText(
 
 
   if (
-    typeof obj.text ===
-    "string"
+    typeof obj.text === "string"
   ) {
 
     return obj.text;
@@ -761,7 +745,7 @@ function extractAIResponseText(
 
 /*
 ============================================================
-PARSE AI JSON
+PARSE JSON
 ============================================================
 */
 
@@ -772,10 +756,6 @@ function parseAIJSON(
   let cleaned =
     text.trim();
 
-
-  /*
-  Remove markdown fences.
-  */
 
   cleaned =
     cleaned.replace(
@@ -814,7 +794,7 @@ function parseAIJSON(
 
 
   /*
-  Search for JSON object inside response.
+  Find JSON object inside text.
   */
 
   const first =
@@ -1025,7 +1005,628 @@ function normalizeAIResult(
 
 /*
 ============================================================
+NATURAL LANGUAGE AI PARSER
+============================================================
+
+The current Cloudflare Llama Vision model is returning
+structured natural language rather than JSON.
+
+Example:
+
+* PPE
+Category: PPE
+Title: Worker's PPE
+Observation: ...
+Status: PASS
+Risk Level: LOW
+Confidence: 0.90
+Check ID: ppe-001
+Source Title: WSH Council resources
+Source URL: https://www.tal.sg/wshc
+
+This parser converts that into Finding objects.
+
+============================================================
+*/
+
+function parseNaturalLanguageAIResponse(
+  text: string
+): AIResult {
+
+  const findings:
+    Finding[] = [];
+
+
+  /*
+  Supported categories.
+
+  We use a broad category list so the parser is not
+  dependent on one particular safety-check library.
+  */
+
+  const categories = [
+    "PPE",
+    "Housekeeping",
+    "Vehicular Safety",
+    "Work at Height",
+    "Lifting",
+    "Electrical Equipment",
+    "Fire Safety",
+    "Storage",
+    "People",
+    "Process",
+    "Equipment",
+    "Traffic Safety",
+    "Chemical Safety",
+    "Manual Handling",
+    "Emergency Preparedness",
+    "Other",
+  ];
+
+
+  /*
+  Escape category names for regex.
+  */
+
+  const escapedCategories =
+    categories
+      .map(
+        category =>
+          category.replace(
+            /[.*+?^${}()|[\]\\]/g,
+            "\\$&"
+          )
+      )
+      .join("|");
+
+
+  /*
+  Match category headings.
+
+  Examples:
+
+  * PPE
+  ** PPE
+  PPE
+  * **PPE**
+  */
+
+  const sectionRegex =
+    new RegExp(
+      `(?:^|\\n)\\s*(?:\\*{1,3}\\s*)?(${escapedCategories})(?:\\s*\\*{1,3})?\\s*(?:\\r?\\n|$)`,
+      "gim"
+    );
+
+
+  const sections: Array<{
+    category: string;
+    text: string;
+  }> = [];
+
+
+  let matches:
+    RegExpExecArray | null;
+
+
+  while (
+    (
+      matches =
+        sectionRegex.exec(text)
+    ) !== null
+  ) {
+
+    const category =
+      matches[1].trim();
+
+
+    const start =
+      matches.index +
+      matches[0].length;
+
+
+    const next =
+      sectionRegex.exec(text);
+
+
+    let end =
+      text.length;
+
+
+    if (next) {
+
+      end =
+        next.index;
+
+      /*
+      Reset lastIndex so the outer loop can
+      continue correctly.
+
+      We already consumed the next match.
+      */
+
+      sectionRegex.lastIndex =
+        next.index;
+
+    }
+
+
+    sections.push({
+
+      category,
+
+      text:
+        text
+          .substring(
+            start,
+            end
+          )
+          .trim(),
+
+    });
+
+  }
+
+
+  /*
+  If regex didn't find sections, use a more
+  forgiving parser based on "* CATEGORY".
+  */
+
+  if (
+    sections.length === 0
+  ) {
+
+    const simpleRegex =
+      /(?:^|\n)\s*\*{1,3}\s*([A-Za-z][A-Za-z ]{2,40})\s*(?:\r?\n|$)/g;
+
+
+    let simpleMatch:
+      RegExpExecArray | null;
+
+
+    while (
+      (
+        simpleMatch =
+          simpleRegex.exec(text)
+      ) !== null
+    ) {
+
+      const category =
+        simpleMatch[1]
+          .trim();
+
+
+      if (
+        !categories.some(
+          item =>
+            item.toLowerCase() ===
+            category.toLowerCase()
+        )
+      ) {
+
+        continue;
+
+      }
+
+
+      const start =
+        simpleMatch.index +
+        simpleMatch[0].length;
+
+
+      const next =
+        text.indexOf(
+          "\n* ",
+          start
+        );
+
+
+      const end =
+        next >= 0
+          ? next
+          : text.length;
+
+
+      sections.push({
+
+        category,
+
+        text:
+          text
+            .substring(
+              start,
+              end
+            )
+            .trim(),
+
+      });
+
+    }
+
+  }
+
+
+  /*
+  Parse each category section.
+  */
+
+  for (
+    const section
+    of sections
+  ) {
+
+    const sectionText =
+      section.text;
+
+
+    /*
+    Category.
+    */
+
+    const categoryMatch =
+      sectionText.match(
+        /(?:^|\r?\n)\s*(?:\*{1,2}\s*)?Category\s*:\s*(.+?)(?:\r?\n|$)/i
+      );
+
+
+    /*
+    Title.
+    */
+
+    const titleMatch =
+      sectionText.match(
+        /(?:^|\r?\n)\s*(?:\*{1,2}\s*)?Title\s*:\s*(.+?)(?:\r?\n|$)/i
+      );
+
+
+    /*
+    Observation.
+    */
+
+    const observationMatch =
+      sectionText.match(
+        /(?:^|\r?\n)\s*(?:\*{1,2}\s*)?Observation\s*:\s*(.+?)(?:\r?\n|$)/i
+      );
+
+
+    /*
+    Status.
+    */
+
+    const statusMatch =
+      sectionText.match(
+        /(?:^|\r?\n)\s*(?:\*{1,2}\s*)?Status\s*:\s*(PASS|FAIL|CHECK_REQUIRED)/i
+      );
+
+
+    /*
+    Risk.
+    */
+
+    const riskMatch =
+      sectionText.match(
+        /(?:^|\r?\n)\s*(?:\*{1,2}\s*)?Risk\s*Level\s*:\s*(LOW|MEDIUM|HIGH)/i
+      );
+
+
+    /*
+    Confidence.
+    */
+
+    const confidenceMatch =
+      sectionText.match(
+        /(?:^|\r?\n)\s*(?:\*{1,2}\s*)?Confidence\s*:\s*([0-9.]+)/i
+      );
+
+
+    /*
+    Check ID.
+    */
+
+    const checkIdMatch =
+      sectionText.match(
+        /(?:^|\r?\n)\s*(?:\*{1,2}\s*)?Check\s*ID\s*:\s*([^\r\n*]+)/i
+      );
+
+
+    /*
+    Source title.
+    */
+
+    const sourceTitleMatch =
+      sectionText.match(
+        /(?:^|\r?\n)\s*(?:\*{1,2}\s*)?Source\s*Title\s*:\s*([^\r\n*]+)/i
+      );
+
+
+    /*
+    Source URL.
+    */
+
+    const sourceUrlMatch =
+      sectionText.match(
+        /(?:^|\r?\n)\s*(?:\*{1,2}\s*)?Source\s*URL\s*:\s*(https?:\/\/[^\s*]+)/i
+      );
+
+
+    /*
+    Need at least title or observation.
+    */
+
+    if (
+      !titleMatch &&
+      !observationMatch
+    ) {
+
+      continue;
+
+    }
+
+
+    const category =
+      cleanString(
+        categoryMatch?.[1],
+        section.category
+      );
+
+
+    const title =
+      cleanString(
+        titleMatch?.[1],
+        category
+      );
+
+
+    const observation =
+      cleanString(
+        observationMatch?.[1],
+        "Physical/site verification required."
+      );
+
+
+    const status =
+      normalizeStatus(
+        statusMatch?.[1]
+      );
+
+
+    const risk =
+      normalizeRisk(
+        riskMatch?.[1]
+      );
+
+
+    const confidence =
+      clampConfidence(
+        confidenceMatch?.[1]
+      );
+
+
+    const checkId =
+      cleanString(
+        checkIdMatch?.[1]
+      )
+      .replace(
+        /\s+$/,
+        ""
+      );
+
+
+    const sourceTitle =
+      cleanString(
+        sourceTitleMatch?.[1],
+        "WSH Council"
+      );
+
+
+    const sourceUrl =
+      cleanString(
+        sourceUrlMatch?.[1],
+        WSH_DEFAULT_URL
+      );
+
+
+    findings.push({
+
+      category,
+
+      title,
+
+      observation,
+
+      status,
+
+      risk_level:
+        risk,
+
+      confidence,
+
+      check_id:
+        checkId,
+
+      source_title:
+        sourceTitle,
+
+      source_url:
+        sourceUrl,
+
+    });
+
+  }
+
+
+  /*
+  Remove duplicates.
+  */
+
+  const unique =
+    findings.filter(
+      (finding, index, array) => {
+
+        return (
+          index ===
+          array.findIndex(
+            item =>
+              item.category
+                .toLowerCase() ===
+                finding.category
+                  .toLowerCase() &&
+
+              item.title
+                .toLowerCase() ===
+                finding.title
+                  .toLowerCase()
+          )
+        );
+
+      }
+    );
+
+
+  /*
+  Build scene summary.
+
+  The AI sometimes puts an overall summary after
+  the findings. We capture that if available.
+  */
+
+  let sceneSummary =
+    "Workplace scene analysed.";
+
+
+  const overallMatch =
+    text.match(
+      /(?:^|\n)\s*(?:Overall|Overall Observation|Summary)\s*:?\s*([\s\S]+)$/i
+    );
+
+
+  if (
+    overallMatch &&
+    overallMatch[1]
+  ) {
+
+    sceneSummary =
+      overallMatch[1]
+        .replace(
+          /\*/g,
+          ""
+        )
+        .trim()
+        .substring(
+          0,
+          1000
+        );
+
+  }
+
+
+  /*
+  If the parser did not find any structured findings,
+  do NOT lose the AI analysis.
+
+  Save it as CHECK_REQUIRED.
+  */
+
+  if (
+    unique.length === 0
+  ) {
+
+    return {
+
+      scene_summary:
+        text
+          .replace(
+            /\*/g,
+            ""
+          )
+          .trim()
+          .substring(
+            0,
+            1500
+          ),
+
+      findings: [
+
+        {
+
+          category:
+            "General Safety",
+
+          title:
+            "AI safety review",
+
+          observation:
+            text
+              .replace(
+                /\*/g,
+                ""
+              )
+              .trim()
+              .substring(
+                0,
+                2000
+              ),
+
+          status:
+            "CHECK_REQUIRED",
+
+          risk_level:
+            "MEDIUM",
+
+          confidence:
+            0.5,
+
+          check_id:
+            "",
+
+          source_title:
+            "WSH Council",
+
+          source_url:
+            WSH_DEFAULT_URL,
+
+        },
+
+      ],
+
+    };
+
+  }
+
+
+  return {
+
+    scene_summary:
+      sceneSummary,
+
+    findings:
+      unique.slice(
+        0,
+        8
+      ),
+
+  };
+
+}
+
+
+/*
+============================================================
 RUN VISION AI
+============================================================
+
+IMPORTANT:
+
+We intentionally DO NOT use response_format here.
+
+Your current Cloudflare model is returning structured
+natural-language output rather than JSON.
+
+The parser above handles that output.
+
+If the model returns JSON in the future, the JSON parser
+will handle it automatically.
+
 ============================================================
 */
 
@@ -1034,21 +1635,6 @@ async function runVisionAI(
   image: string,
   prompt: string
 ): Promise<AIResult> {
-
-  /*
-  JSON MODE.
-
-  This is the important change.
-
-  The previous AI response was:
-
-  "The image shows a worker..."
-
-  rather than JSON.
-
-  JSON Mode asks Cloudflare's model to return a JSON
-  object instead.
-  */
 
   const aiInput = {
 
@@ -1060,13 +1646,40 @@ async function runVisionAI(
 
         content:
           `
-You are a workplace safety inspection AI.
+You are a Singapore workplace safety inspection assistant.
 
-Return ONLY a valid JSON object.
+Analyse workplace photographs carefully.
 
-Never return Markdown.
-Never return bullet points.
-Never return explanatory text outside JSON.
+Return concise structured safety findings.
+
+For every finding use exactly this format:
+
+* CATEGORY
+
+Category: CATEGORY
+Title: TITLE
+Observation: OBSERVATION
+Status: PASS
+Risk Level: LOW
+Confidence: 0.90
+Check ID: CHECK-ID
+Source Title: SOURCE
+Source URL: URL
+
+Only report visible or reasonably supported conditions.
+
+Do not invent hazards.
+
+Do not assume that something is safe simply because
+it cannot be seen.
+
+Use CHECK_REQUIRED where visual verification is needed.
+
+Use FAIL only for clearly visible unsafe conditions.
+
+Use PASS only where there is reasonable visual evidence.
+
+Maximum 8 findings.
 `,
 
       },
@@ -1093,18 +1706,11 @@ Never return explanatory text outside JSON.
     top_p:
       0.9,
 
-    response_format: {
-
-      type:
-        "json_object",
-
-    },
-
   };
 
 
   console.log(
-    "Calling Workers AI:",
+    "Calling Workers AI Vision:",
     MODEL
   );
 
@@ -1137,33 +1743,33 @@ Never return explanatory text outside JSON.
 
 
   console.log(
-    "Workers AI raw response received."
+    "Workers AI response received."
   );
 
 
   /*
-  If JSON Mode returned an object.
+  Extract text.
+  */
+
+  const text =
+    extractAIResponseText(
+      response
+    );
+
+
+  /*
+  If Cloudflare returns a structured object
+  directly, use it.
   */
 
   if (
     response &&
-    typeof response === "object"
+    typeof response ===
+      "object"
   ) {
 
     const object =
       response as any;
-
-
-    if (
-      object.response &&
-      typeof object.response === "object"
-    ) {
-
-      return normalizeAIResult(
-        object.response
-      );
-
-    }
 
 
     if (
@@ -1176,17 +1782,20 @@ Never return explanatory text outside JSON.
 
     }
 
+
+    if (
+      object.response &&
+      typeof object.response ===
+        "object"
+    ) {
+
+      return normalizeAIResult(
+        object.response
+      );
+
+    }
+
   }
-
-
-  /*
-  Otherwise extract text.
-  */
-
-  const text =
-    extractAIResponseText(
-      response
-    );
 
 
   if (!text) {
@@ -1199,13 +1808,25 @@ Never return explanatory text outside JSON.
 
 
   console.log(
-    "AI response length:",
+    "Workers AI text length:",
     text.length
   );
 
 
+  console.log(
+    "Workers AI text:",
+    text.substring(
+      0,
+      4000
+    )
+  );
+
+
   /*
-  Parse JSON.
+  First try JSON.
+
+  This allows the application to continue working
+  if the model later returns JSON.
   */
 
   try {
@@ -1223,18 +1844,20 @@ Never return explanatory text outside JSON.
   } catch {
 
     /*
-    IMPORTANT:
+    Current model behaviour:
 
-    Include the actual AI output so if Cloudflare
-    still returns normal text we can see it.
+    It returns structured natural language.
+
+    Parse that instead.
     */
 
-    throw new Error(
-      "Workers AI did not return valid JSON. Model response: " +
-      text.substring(
-        0,
-        4000
-      )
+    console.log(
+      "AI response is not JSON. Using natural-language parser."
+    );
+
+
+    return parseNaturalLanguageAIResponse(
+      text
     );
 
   }
@@ -1244,7 +1867,7 @@ Never return explanatory text outside JSON.
 
 /*
 ============================================================
-MATCH SAFETY CHECK
+MATCH FINDING TO SAFETY CHECK
 ============================================================
 */
 
@@ -1254,7 +1877,7 @@ function matchSafetyCheck(
 ): SafetyCheck | null {
 
   /*
-  Exact ID first.
+  1. Exact check ID.
   */
 
   if (
@@ -1279,11 +1902,12 @@ function matchSafetyCheck(
 
 
   /*
-  Category match.
+  2. Category.
   */
 
   const category =
     finding.category
+      .trim()
       .toLowerCase();
 
 
@@ -1291,6 +1915,7 @@ function matchSafetyCheck(
     checks.find(
       check =>
         check.category
+          .trim()
           .toLowerCase() ===
         category
     );
@@ -1306,7 +1931,7 @@ function matchSafetyCheck(
 
 
   /*
-  Keyword matching.
+  3. Keyword matching.
   */
 
   const searchText =
@@ -1339,8 +1964,8 @@ function matchSafetyCheck(
         .toLowerCase()
         .split(",")
         .map(
-          item =>
-            item.trim()
+          keyword =>
+            keyword.trim()
         )
         .filter(Boolean);
 
@@ -1355,6 +1980,7 @@ function matchSafetyCheck(
     ) {
 
       if (
+        keyword &&
         searchText.includes(
           keyword
         )
@@ -1390,7 +2016,7 @@ function matchSafetyCheck(
 
 /*
 ============================================================
-OVERALL RESULT
+CALCULATE OVERALL RESULT
 ============================================================
 */
 
@@ -1400,8 +2026,8 @@ function calculateOverall(
 
   if (
     findings.some(
-      item =>
-        item.status ===
+      finding =>
+        finding.status ===
         "FAIL"
     )
   ) {
@@ -1413,8 +2039,8 @@ function calculateOverall(
 
   if (
     findings.some(
-      item =>
-        item.status ===
+      finding =>
+        finding.status ===
         "CHECK_REQUIRED"
     )
   ) {
@@ -1596,7 +2222,7 @@ async function createInspection(
   ) {
 
     throw new Error(
-      "No usable columns found in inspections."
+      "No usable columns were found in inspections."
     );
 
   }
@@ -1864,7 +2490,7 @@ async function savePhoto(
   ) {
 
     throw new Error(
-      "No usable columns found in inspection_photos."
+      "No usable columns were found in inspection_photos."
     );
 
   }
@@ -1905,7 +2531,7 @@ async function savePhoto(
 ============================================================
 SAVE INSPECTION ITEMS
 
-YOUR CONFIRMED TABLE:
+CONFIRMED TABLE:
 
 id
 inspection_id
@@ -2032,7 +2658,7 @@ async function handleAnalyse(
 
 
   /*
-  Read request.
+  Read request JSON.
   */
 
   try {
@@ -2056,7 +2682,7 @@ async function handleAnalyse(
 
 
   /*
-  Image required.
+  Validate image.
   */
 
   if (
@@ -2139,7 +2765,7 @@ async function handleAnalyse(
 
 
   /*
-  Check request size.
+  Avoid excessively large requests.
   */
 
   if (
@@ -2161,7 +2787,7 @@ async function handleAnalyse(
 
 
   /*
-  Load WSH checks.
+  Load safety checks.
   */
 
   const checks =
@@ -2251,7 +2877,7 @@ async function handleAnalyse(
 
 
   /*
-  Build prompt.
+  Build AI prompt.
   */
 
   const prompt =
@@ -2261,7 +2887,7 @@ async function handleAnalyse(
 
 
   /*
-  AI analysis.
+  Run AI.
   */
 
   let aiResult:
@@ -2300,7 +2926,7 @@ async function handleAnalyse(
       );
 
     } catch {
-      // Ignore update error.
+      // Ignore secondary error.
     }
 
 
@@ -2323,7 +2949,7 @@ async function handleAnalyse(
 
 
   /*
-  Match findings to safety checks.
+  Match findings against safety_checks.
   */
 
   const findings =
@@ -2398,7 +3024,7 @@ async function handleAnalyse(
 
 
     console.error(
-      "SAVE ITEMS ERROR:",
+      "SAVE INSPECTION ITEMS ERROR:",
       detail
     );
 
@@ -2408,7 +3034,7 @@ async function handleAnalyse(
         success: false,
 
         error:
-          "AI analysis completed but findings could not be saved.",
+          "AI analysis completed but the findings could not be saved.",
 
         detail,
 
@@ -2432,7 +3058,7 @@ async function handleAnalyse(
 
 
   /*
-  Update inspection.
+  Update overall inspection result.
   */
 
   try {
@@ -2454,7 +3080,7 @@ async function handleAnalyse(
 
 
   /*
-  Return successful result.
+  Return result.
   */
 
   return jsonResponse(
@@ -2520,11 +3146,13 @@ async function handleRecentInspections(
 
     return jsonResponse(
       {
+
         success: true,
 
         inspections:
           result.results ||
           [],
+
       }
     );
 
@@ -2532,6 +3160,7 @@ async function handleRecentInspections(
 
     return jsonResponse(
       {
+
         success: false,
 
         error:
@@ -2540,7 +3169,8 @@ async function handleRecentInspections(
         detail:
           error instanceof Error
             ? error.message
-            : String(error)
+            : String(error),
+
       },
       500
     );
@@ -2583,10 +3213,12 @@ async function handleSingleInspection(
 
       return jsonResponse(
         {
+
           success: false,
 
           error:
             "Inspection not found."
+
         },
         404
       );
@@ -2648,6 +3280,7 @@ async function handleSingleInspection(
 
     return jsonResponse(
       {
+
         success: false,
 
         error:
@@ -2656,7 +3289,8 @@ async function handleSingleInspection(
         detail:
           error instanceof Error
             ? error.message
-            : String(error)
+            : String(error),
+
       },
       500
     );
@@ -2668,7 +3302,7 @@ async function handleSingleInspection(
 
 /*
 ============================================================
-SAFETY CHECKS API
+SAFETY CHECKS
 ============================================================
 */
 
@@ -2816,7 +3450,7 @@ async function route(
 
 
   /*
-  ANALYSE / ANALYZE
+  ANALYSE
   */
 
   if (
@@ -2888,10 +3522,12 @@ async function route(
 
       return jsonResponse(
         {
+
           success: false,
 
           error:
             "Inspection ID is required."
+
         },
         400
       );
@@ -2948,6 +3584,9 @@ async function route(
 
         model:
           MODEL,
+
+        vectorize:
+          false,
 
         endpoints: [
 
@@ -3017,7 +3656,7 @@ async function route(
 
 /*
 ============================================================
-WORKER ENTRY
+WORKER ENTRY POINT
 ============================================================
 */
 
@@ -3040,6 +3679,7 @@ export default {
       return new Response(
         null,
         {
+
           status: 204,
 
           headers:
