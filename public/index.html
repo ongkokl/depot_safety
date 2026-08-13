@@ -111,9 +111,17 @@ analyse.onclick=async()=>{
   fd.append("inspector",$("inspector").value||"Inspector");
   fd.append("location",$("location").value||"Unspecified");
   try{
+    setResult(null);
+setStatus("Analysing photo...");
     const r=await fetch("/api/analyze",{method:"POST",body:fd});
     const data=await r.json();
-    if(!r.ok)throw new Error(data.error||"Analysis failed");
+  if (!r.ok) {
+  throw new Error(
+    data.detail ||
+    data.error ||
+    "Analysis failed"
+  );
+}
     render(data); setStatus("Analysis complete.");
     loadHistory();
   }catch(e){setStatus("❌ "+escapeHtml(e.message));}
