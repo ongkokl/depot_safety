@@ -2631,4 +2631,116 @@ export default {
 
     /*
      * --------------------------------------------------------
-    
+     * RECENT INSPECTIONS
+     * --------------------------------------------------------
+     */
+
+    if (
+      url.pathname ===
+      "/api/inspections"
+    ) {
+
+      if (
+        request.method !== "GET"
+      ) {
+
+        return json(
+          {
+            error:
+              "Method not allowed."
+          },
+          405
+        );
+      }
+
+
+      return getInspections(
+        env
+      );
+    }
+
+
+    /*
+     * --------------------------------------------------------
+     * SINGLE INSPECTION
+     * --------------------------------------------------------
+     */
+
+    const inspectionPrefix =
+      "/api/inspections/";
+
+
+    if (
+      url.pathname.startsWith(
+        inspectionPrefix
+      )
+    ) {
+
+      const inspectionId =
+        decodeURIComponent(
+          url.pathname.slice(
+            inspectionPrefix.length
+          )
+        );
+
+
+      if (
+        inspectionId
+      ) {
+
+        return getInspection(
+          env,
+          inspectionId
+        );
+      }
+    }
+
+
+    /*
+     * --------------------------------------------------------
+     * FRONTEND ASSETS
+     * --------------------------------------------------------
+     */
+
+    if (
+      env.ASSETS
+    ) {
+
+      try {
+
+        return env.ASSETS.fetch(
+          request
+        );
+
+      } catch (
+        error
+      ) {
+
+        console.error(
+          "ASSETS ERROR:",
+          error
+        );
+      }
+    }
+
+
+    /*
+     * --------------------------------------------------------
+     * DEFAULT
+     * --------------------------------------------------------
+     */
+
+    return new Response(
+      "Safety Inspection AI",
+      {
+        status: 200,
+
+        headers: {
+          "Content-Type":
+            "text/plain"
+        }
+      }
+    );
+  }
+
+} satisfies ExportedHandler<Env>;
