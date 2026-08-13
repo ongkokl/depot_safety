@@ -38,198 +38,126 @@ async function analyzeImage(
   imageDataUrl: string
 ): Promise<any> {
 
-  const safetySchema = {
-    type: "object",
-    properties: {
-      scene_summary: {
-        type: "string"
-      },
+  const prompt = `
+You are a workplace safety inspection AI for Singapore.
 
-      observations: {
-        type: "array",
-        items: {
-          type: "object",
-          properties: {
-            category: {
-              type: "string",
-              enum: [
-                "Vehicular Safety",
-                "Housekeeping",
-                "PPE",
-                "Work at Height",
-                "Lifting",
-                "Other"
-              ]
-            },
+Analyse the workplace photograph.
 
-            title: {
-              type: "string"
-            },
+Return ONLY a valid JSON object.
+Do NOT use Markdown.
+Do NOT use code fences.
+Do NOT add any text before or after the JSON.
 
-            observation: {
-              type: "string"
-            },
+The JSON must have exactly this structure:
 
-            risk_level: {
-              type: "string",
-              enum: [
-                "HIGH",
-                "MEDIUM",
-                "LOW"
-              ]
-            },
+{
+  "scene_summary": "short description",
+  "observations": [
+    {
+      "category": "Vehicular Safety",
+      "title": "short finding title",
+      "observation": "what can actually be seen",
+      "risk_level": "HIGH",
+      "confidence": 0.90,
+      "status": "CHECK_REQUIRED"
+    }
+  ]
+}
 
-            confidence: {
-              type: "number"
-            },
-
-            status: {
-              type: "string",
-              enum: [
-                "FAIL",
-                "CHECK_REQUIRED",
-                "PASS"
-              ]
-            }
-          },
-
-          required: [
-            "category",
-            "title",
-            "observation",
-            "risk_level",
-            "confidence",
-            "status"
-          ]
-        }
-      }
-    },
-
-    required: [
-      "scene_summary",
-      "observations"
-    ]
-  };
-
-  try {
-
-    const messages = [
-
-      {
-        role: "system",
-        content: `
-You are an AI assistant for workplace safety inspections in Singapore.
-
-Your task is to examine a workplace photograph and identify visible
-safety-related conditions that an inspector should check.
-
-IMPORTANT:
-
-1. Only report things that are visibly supported by the photograph.
-2. Do not invent objects, hazards or activities.
-3. Do not make legal conclusions.
-4. Do not say that a workplace is legally compliant based only on a photo.
-5. Use CHECK_REQUIRED when the photograph does not provide enough evidence.
-6. PASS means that the visible condition appears acceptable only.
-7. FAIL means a visible condition appears potentially unsafe.
-8. HIGH risk should only be used for a clearly visible significant hazard.
-9. Maximum 6 observations.
-10. Keep each observation concise.
-11. Do not include Markdown.
-12. Return ONLY the JSON object required by the schema.
-
-Focus on:
+Allowed category values:
 
 - Vehicular Safety
 - Housekeeping
 - PPE
 - Work at Height
 - Lifting
+- Other
+
+Allowed risk levels:
+
+- HIGH
+- MEDIUM
+- LOW
+
+Allowed status values:
+
+- PASS
+- FAIL
+- CHECK_REQUIRED
+
+IMPORTANT SAFETY RULES:
+
+1. Only report things that are actually visible in the photograph.
+2. Do not invent hazards.
+3. Do not make a legal compliance determination.
+4. A photograph may not provide enough information to determine compliance.
+5. Use CHECK_REQUIRED when physical/site verification is needed.
+6. PASS means the visible condition appears acceptable only.
+7. FAIL means a potentially unsafe visible condition is present.
+8. Do not assume PPE is compliant simply because a helmet or vest is visible.
+9. If a crane or lifting equipment is visible but the worker's exposure to the lifting operation cannot be determined, use CHECK_REQUIRED.
+10. If a worker is near an edge, opening, platform or guardrail, consider Work at Height and edge protection.
+11. Maximum 6 observations.
+12. Keep each observation below 250 characters.
+13. confidence must be a number between 0 and 1.
+
+For this photograph, specifically inspect:
+
+- Workers
+- PPE
+- Guardrails
+- Open edges
+- Fall hazards
+- Work at height
+- Lifting equipment
+- Suspended loads
+- Vehicles
+- Pedestrian interaction
+- Housekeeping
+- Obstructions
+- Spills
 - Other obvious physical hazards
+`;
 
-For example:
-
-A worker wearing a helmet does NOT automatically mean the PPE requirement
-is fully compliant. If the image cannot determine whether the PPE is
-appropriate for the task, use CHECK_REQUIRED.
-
-If a crane is visible but the photograph does not show whether a person is
-inside an exclusion zone, use CHECK_REQUIRED rather than FAIL.
-
-If there is a possible fall hazard near an edge, identify the visible
-condition and recommend verification of fall protection.
-`
-      },
-
-      {
-        role: "user",
-        content: `
-Analyse this workplace safety inspection photograph.
-
-Identify the visible workplace situation and the safety checks that an
-inspector should perform.
-
-Pay particular attention to:
-
-1. People
-2. Vehicles
-3. Pedestrians
-4. Guardrails
-5. Edges/openings
-6. Work at height
-7. Lifting equipment
-8. Suspended loads
-9. PPE
-10. Housekeeping
-11. Obstructions
-12. Spills or slippery surfaces
-
-Do not assume something is unsafe if it cannot be seen clearly.
-`
-      }
-
-    ];
+  try {
 
     const response: any = await env.AI.run(
       VISION_MODEL,
       {
-        messages,
-
+        prompt,
         image: imageDataUrl,
 
         response_format: {
-          type: "json_schema",
-          json_schema: safetySchema
+          type: "json_object"
         },
 
         temperature: 0.1,
-
         max_tokens: 1200
       }
     );
 
-    const raw = response?.response ?? response?.result ?? "";
-
     console.log(
-      "Workers AI response:",
+      "Workers AI raw response:",
       JSON.stringify(response)
     );
 
-    if (!raw) {
+    const raw =
+      response?.response ??
+      response?.result ??
+      "";
 
+    if (!raw) {
       throw new Error(
         "Workers AI returned an empty response."
       );
-
     }
 
-    /*
-     * JSON Mode normally returns a JSON string.
-     *
-     * Some Workers AI responses may already be objects, so handle both.
-     */
-
     let parsed: any;
+
+    /*
+     * Workers AI normally returns JSON text.
+     * Handle both JSON text and an already parsed object.
+     */
 
     if (typeof raw === "object") {
 
@@ -237,168 +165,162 @@ Do not assume something is unsafe if it cannot be seen clearly.
 
     } else {
 
-      let text = String(raw).trim();
+      let text =
+        String(raw).trim();
 
       /*
-       * Defensive cleanup in case the model still adds Markdown fences.
+       * Defensive cleanup if the model
+       * still returns Markdown fences.
        */
 
-      if (text.startsWith("```")) {
+      text = text
+        .replace(/^```json\s*/i, "")
+        .replace(/^```\s*/i, "")
+        .replace(/```\s*$/i, "")
+        .trim();
 
-        text = text
-          .replace(/^```json\s*/i, "")
-          .replace(/^```\s*/i, "")
-          .replace(/```\s*$/i, "")
-          .trim();
-
-      }
-
-      parsed = JSON.parse(text);
-
+      parsed =
+        JSON.parse(text);
     }
 
     /*
-     * Basic validation.
+     * Validate top-level response.
      */
 
     if (
       !parsed ||
       typeof parsed !== "object"
     ) {
-
       throw new Error(
-        "Workers AI returned an invalid JSON object."
+        "AI returned an invalid JSON object."
       );
-
     }
 
     if (
-      !Array.isArray(parsed.observations)
+      typeof parsed.scene_summary !==
+      "string"
     ) {
+      parsed.scene_summary =
+        "Workplace scene analysed.";
+    }
 
+    if (
+      !Array.isArray(
+        parsed.observations
+      )
+    ) {
       parsed.observations = [];
-
     }
 
     /*
-     * Limit the number of findings.
+     * Limit to six findings.
      */
 
     parsed.observations =
-      parsed.observations.slice(0, 6);
+      parsed.observations
+        .slice(0, 6)
+        .map(
+          (item: any) => {
 
-    /*
-     * Normalise each finding.
-     */
+            const categories = [
+              "Vehicular Safety",
+              "Housekeeping",
+              "PPE",
+              "Work at Height",
+              "Lifting",
+              "Other"
+            ];
 
-    parsed.observations =
-      parsed.observations.map(
-        (observation: any) => {
+            const risks = [
+              "HIGH",
+              "MEDIUM",
+              "LOW"
+            ];
 
-          const allowedCategories = [
-            "Vehicular Safety",
-            "Housekeeping",
-            "PPE",
-            "Work at Height",
-            "Lifting",
-            "Other"
-          ];
+            const statuses = [
+              "PASS",
+              "FAIL",
+              "CHECK_REQUIRED"
+            ];
 
-          const allowedRisk = [
-            "HIGH",
-            "MEDIUM",
-            "LOW"
-          ];
+            const category =
+              categories.includes(
+                item?.category
+              )
+                ? item.category
+                : "Other";
 
-          const allowedStatus = [
-            "FAIL",
-            "CHECK_REQUIRED",
-            "PASS"
-          ];
+            const risk =
+              risks.includes(
+                item?.risk_level
+              )
+                ? item.risk_level
+                : "MEDIUM";
 
-          const category =
-            allowedCategories.includes(
-              observation?.category
-            )
-              ? observation.category
-              : "Other";
+            const status =
+              statuses.includes(
+                item?.status
+              )
+                ? item.status
+                : "CHECK_REQUIRED";
 
-          const risk =
-            allowedRisk.includes(
-              observation?.risk_level
-            )
-              ? observation.risk_level
-              : "MEDIUM";
+            let confidence =
+              Number(
+                item?.confidence
+              );
 
-          const status =
-            allowedStatus.includes(
-              observation?.status
-            )
-              ? observation.status
-              : "CHECK_REQUIRED";
-
-          let confidence =
-            Number(
-              observation?.confidence
-            );
-
-          if (
-            Number.isNaN(confidence)
-          ) {
-            confidence = 0.5;
-          }
-
-          confidence =
-            Math.max(
-              0,
-              Math.min(
-                1,
+            if (
+              Number.isNaN(
                 confidence
               )
-            );
+            ) {
+              confidence = 0.5;
+            }
 
-          return {
+            confidence =
+              Math.max(
+                0,
+                Math.min(
+                  1,
+                  confidence
+                )
+              );
 
-            category,
+            return {
 
-            title:
-              String(
-                observation?.title ||
-                "Safety observation"
-              ).slice(0, 200),
+              category,
 
-            observation:
-              String(
-                observation?.observation ||
-                "Further inspection is required."
-              ).slice(0, 500),
+              title:
+                String(
+                  item?.title ||
+                  "Safety observation"
+                ).slice(0, 200),
 
-            risk_level:
-              risk,
+              observation:
+                String(
+                  item?.observation ||
+                  "Further inspection required."
+                ).slice(0, 500),
 
-            confidence,
+              risk_level:
+                risk,
 
-            status
+              confidence,
 
-          };
+              status
 
-        }
-      );
+            };
+          }
+        );
 
     return parsed;
 
   } catch (error: any) {
 
     console.error(
-      "Workers AI analysis failed:",
+      "Workers AI analysis error:",
       error
     );
-
-    /*
-     * IMPORTANT:
-     * Throw the error instead of hiding it.
-     * The API endpoint will return the real error to the browser.
-     */
 
     throw new Error(
       `AI analysis failed: ${
@@ -406,11 +328,8 @@ Do not assume something is unsafe if it cannot be seen clearly.
         String(error)
       }`
     );
-
   }
-
 }
-
 
 /**
  * Find relevant WSH checks from D1.
