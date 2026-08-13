@@ -3,24 +3,21 @@
  * SAFETY INSPECTION AI
  * Cloudflare Worker
  *
- * Database:
- *   D1
+ * D1 TABLES USED:
  *
- * Tables:
- *   inspections
- *   inspection_photos
- *   findings
- *   safety_checks
- *   corrective_actions
+ * inspections
+ * inspection_photos
+ * findings
+ * safety_checks
+ * corrective_actions
  *
- * AI:
- *   @cf/meta/llama-3.2-11b-vision-instruct
+ * Workers AI:
+ * @cf/meta/llama-3.2-11b-vision-instruct
  *
  * Vectorize:
- *   NOT USED
+ * NOT USED
  * ============================================================
  */
-
 
 interface Env {
   AI: Ai;
@@ -28,7 +25,6 @@ interface Env {
   PHOTOS: R2Bucket;
   ASSETS?: Fetcher;
 }
-
 
 const MODEL =
   "@cf/meta/llama-3.2-11b-vision-instruct";
@@ -39,7 +35,6 @@ const MODEL =
  * TYPES
  * ============================================================
  */
-
 
 interface SafetyCheck {
   id: string;
@@ -52,6 +47,14 @@ interface SafetyCheck {
   active: number;
 }
 
+interface AIFinding {
+  category: string;
+  title: string;
+  observation: string;
+  status: string;
+  risk_level: string;
+  confidence: number;
+}
 
 interface ParsedFinding {
   category: string;
@@ -75,7 +78,6 @@ interface ParsedFinding {
  * ============================================================
  */
 
-
 function json(
   data: any,
   status = 200
@@ -85,7 +87,6 @@ function json(
     JSON.stringify(data),
     {
       status,
-
       headers: {
         "Content-Type":
           "application/json; charset=utf-8",
@@ -120,19 +121,15 @@ function text(
 
 
 function newId(): string {
-
   return crypto.randomUUID();
-
 }
 
 
 function inspectionNumber(): string {
 
-  const now =
-    new Date();
-
   const date =
-    now.toISOString()
+    new Date()
+      .toISOString()
       .slice(0, 10)
       .replace(/-/g, "");
 
@@ -143,16 +140,14 @@ function inspectionNumber(): string {
       .toUpperCase();
 
   return `SI-${date}-${random}`;
-
 }
 
 
 /*
  * ============================================================
- * CATEGORY NORMALISATION
+ * NORMALISE CATEGORY
  * ============================================================
  */
-
 
 function normaliseCategory(
   category: string,
@@ -171,13 +166,12 @@ function normaliseCategory(
     value.includes("helmet") ||
     value.includes("safety vest") ||
     value.includes("high visibility") ||
+    value.includes("high-visibility") ||
     value.includes("hi-vis") ||
     value.includes("glove") ||
     value.includes("safety shoe")
   ) {
-
     return "PPE";
-
   }
 
 
@@ -192,9 +186,7 @@ function normaliseCategory(
     value.includes("ladder") ||
     value.includes("scaffold")
   ) {
-
     return "Work at Height";
-
   }
 
 
@@ -206,9 +198,7 @@ function normaliseCategory(
     value.includes("hook") ||
     value.includes("sling")
   ) {
-
     return "Lifting";
-
   }
 
 
@@ -221,9 +211,7 @@ function normaliseCategory(
     value.includes("traffic") ||
     value.includes("pedestrian")
   ) {
-
     return "Vehicular Safety";
-
   }
 
 
@@ -237,89 +225,80 @@ function normaliseCategory(
     value.includes("clutter") ||
     value.includes("obstruction")
   ) {
-
     return "Housekeeping";
-
   }
 
 
   return "Other";
-
 }
 
 
 /*
  * ============================================================
- * NORMALISE STATUS / RISK
+ * NORMALISE STATUS
  * ============================================================
  */
 
-
 function normaliseStatus(
-  value: string
-): ParsedFinding["status"] {
+  value: any
+): "PASS" | "CHECK_REQUIRED" | "FAIL" {
 
   const v =
-    value
+    String(value ?? "")
       .toUpperCase()
-      .replace(/[\s-]+/g, "_");
+      .replace(/[\s-]+/g, "_")
+      .trim();
 
 
-  if (
-    v === "PASS"
-  ) {
-
+  if (v === "PASS") {
     return "PASS";
-
   }
 
 
-  if (
-    v === "FAIL"
-  ) {
-
+  if (v === "FAIL") {
     return "FAIL";
-
   }
 
 
   return "CHECK_REQUIRED";
-
 }
 
 
+/*
+ * ============================================================
+ * NORMALISE RISK
+ * ============================================================
+ */
+
 function normaliseRisk(
-  value: string
-): ParsedFinding["risk_level"] {
+  value: any
+): "LOW" | "MEDIUM" | "HIGH" {
 
   const v =
-    value
+    String(value ?? "")
       .toUpperCase()
       .trim();
 
 
-  if (
-    v === "LOW"
-  ) {
-
+  if (v === "LOW") {
     return "LOW";
-
   }
 
 
-  if (
-    v === "HIGH"
-  ) {
-
+  if (v === "HIGH") {
     return "HIGH";
-
   }
 
 
   return "MEDIUM";
-
 }
 
+
+/*
+ * ============================================================
+ * NORMALISE CONFIDENCE
+ * ============================================================
+ */
 
 function normaliseConfidence(
   value: any
@@ -332,23 +311,16 @@ function normaliseConfidence(
   if (
     Number.isNaN(n)
   ) {
-
     return 0.5;
-
   }
 
 
   /*
-   * Handle models returning 95 instead of 0.95.
+   * Model may return 95 instead of 0.95.
    */
 
-  if (
-    n > 1
-  ) {
-
-    n =
-      n / 100;
-
+  if (n > 1) {
+    n = n / 100;
   }
 
 
@@ -359,7 +331,6 @@ function normaliseConfidence(
       n
     )
   );
-
 }
 
 
@@ -369,7 +340,6 @@ function normaliseConfidence(
  * ============================================================
  */
 
-
 async function fileToDataUrl(
   file: File
 ): Promise<string> {
@@ -377,16 +347,10 @@ async function fileToDataUrl(
   const buffer =
     await file.arrayBuffer();
 
-
   const bytes =
-    new Uint8Array(
-      buffer
-    );
+    new Uint8Array(buffer);
 
-
-  let binary =
-    "";
-
+  let binary = "";
 
   const chunkSize =
     0x8000;
@@ -407,63 +371,112 @@ async function fileToDataUrl(
         )
       );
 
-
     binary +=
       String.fromCharCode(
         ...chunk
       );
-
   }
 
 
   return (
     `data:${file.type || "image/jpeg"};base64,${btoa(binary)}`
   );
-
 }
 
 
 /*
  * ============================================================
- * EXTRACT AI RESPONSE
+ * AI JSON SCHEMA
  * ============================================================
  */
 
+const AI_RESPONSE_SCHEMA = {
 
-function extractAiText(
-  result: any
-): string {
+  type: "object",
 
-  if (
-    typeof result === "string"
-  ) {
+  properties: {
 
-    return result.trim();
+    summary: {
+      type: "string"
+    },
 
-  }
+    findings: {
 
+      type: "array",
 
-  if (
-    typeof result?.response === "string"
-  ) {
+      items: {
 
-    return result.response.trim();
+        type: "object",
 
-  }
+        properties: {
 
+          category: {
+            type: "string",
+            enum: [
+              "PPE",
+              "Work at Height",
+              "Lifting",
+              "Vehicular Safety",
+              "Housekeeping",
+              "Other"
+            ]
+          },
 
-  if (
-    typeof result?.result === "string"
-  ) {
+          title: {
+            type: "string"
+          },
 
-    return result.result.trim();
+          observation: {
+            type: "string"
+          },
 
-  }
+          status: {
+            type: "string",
+            enum: [
+              "PASS",
+              "CHECK_REQUIRED",
+              "FAIL"
+            ]
+          },
 
+          risk_level: {
+            type: "string",
+            enum: [
+              "LOW",
+              "MEDIUM",
+              "HIGH"
+            ]
+          },
 
-  return "";
+          confidence: {
+            type: "number",
+            minimum: 0,
+            maximum: 1
+          }
 
-}
+        },
+
+        required: [
+          "category",
+          "title",
+          "observation",
+          "status",
+          "risk_level",
+          "confidence"
+        ]
+
+      }
+
+    }
+
+  },
+
+  required: [
+    "summary",
+    "findings"
+  ]
+
+};
 
 
 /*
@@ -471,7 +484,6 @@ function extractAiText(
  * AI PROMPT
  * ============================================================
  */
-
 
 function buildPrompt(): string {
 
@@ -481,171 +493,233 @@ Singapore workplace safety inspector.
 
 Analyse ONLY what can reasonably be seen in the photograph.
 
-This is an assistance tool. Do not make a final legal,
-regulatory or compliance decision.
+This is an assistance tool.
+Do not make a final legal, regulatory or compliance decision.
 
-IMPORTANT:
+IMPORTANT SAFETY RULES:
 
-- Do not invent hazards.
-- Do not assume a hazard exists because equipment is visible.
-- If something cannot be confirmed visually, use CHECK_REQUIRED.
-- Use FAIL only when an unsafe condition is clearly visible.
-- Use PASS when the visible condition appears acceptable.
-- Maximum 6 findings.
+1. Do not invent hazards.
+
+2. Do not assume a hazard exists merely because equipment
+   is visible somewhere in the photograph.
+
+3. If something cannot be confirmed visually, use
+   CHECK_REQUIRED.
+
+4. Use FAIL only when an unsafe condition is clearly visible.
+
+5. Use PASS when the visible condition appears acceptable.
+
+6. Maximum 6 findings.
+
+7. Do not report every visible object as a safety issue.
+
+8. Focus on conditions relevant to workplace safety inspection.
 
 SAFETY AREAS:
 
-1. PPE
-   - hard hat
-   - safety helmet
-   - safety vest
-   - high visibility clothing
-   - gloves
-   - safety shoes
+PPE:
+- hard hat
+- safety helmet
+- safety vest
+- high visibility clothing
+- gloves
+- safety shoes
 
-2. Work at Height
-   - guardrails
-   - handrails
-   - open edges
-   - platforms
-   - ladders
-   - scaffolds
-   - fall hazards
+WORK AT HEIGHT:
+- guardrails
+- handrails
+- open edges
+- platforms
+- ladders
+- scaffolds
+- fall hazards
 
-3. Lifting
-   - cranes
-   - lifting equipment
-   - hooks
-   - slings
-   - suspended loads
-   - container lifting
+LIFTING:
+- cranes
+- lifting equipment
+- hooks
+- slings
+- suspended loads
+- container lifting
 
-4. Vehicular Safety
-   - trucks
-   - prime movers
-   - forklifts
-   - vehicles
-   - pedestrian routes
-   - traffic interaction
+VEHICULAR SAFETY:
+- trucks
+- prime movers
+- forklifts
+- vehicles
+- pedestrian routes
+- vehicle/pedestrian interaction
 
-5. Housekeeping
-   - spills
-   - oil
-   - water
-   - wet surfaces
-   - debris
-   - clutter
-   - blocked access
-   - obstructions
+HOUSEKEEPING:
+- spills
+- oil
+- water
+- wet surfaces
+- debris
+- clutter
+- blocked access
+- obstructions
 
-SAFETY RULES:
+IMPORTANT VISUAL REASONING:
 
-1. If a hard hat is clearly visible, recognise it as PPE.
-2. If a safety vest is clearly visible, recognise it as PPE.
-3. If a guardrail is visible, do NOT say there is no guardrail.
-4. A crane in the background does not automatically mean
-   the worker is exposed to a lifting hazard.
-5. Only report a spill when a spill is actually visible.
-6. Shadows, reflections and stains are not automatically spills.
-7. Only report a fall hazard when there is reasonable visual evidence.
-8. If uncertain, use CHECK_REQUIRED.
-9. Do not invent WSH requirements that cannot be related to
-   the visible condition.
+A visible hard hat is evidence of PPE compliance.
+A visible safety vest is evidence of PPE compliance.
 
-RETURN THIS EXACT MACHINE-READABLE FORMAT:
+If a guardrail is clearly visible, DO NOT say
+"no guardrail".
 
-SUMMARY|||short factual description
+If a guardrail is visible but its completeness or condition
+cannot be confirmed, use CHECK_REQUIRED.
 
-FINDING|||CATEGORY|||TITLE|||STATUS|||RISK|||CONFIDENCE|||OBSERVATION
+A crane visible in the background does NOT automatically
+mean the worker is exposed to a lifting hazard.
 
-CATEGORY must be one of:
+If lifting equipment is visible but no suspended load or
+worker exposure can be confirmed, use CHECK_REQUIRED rather
+than FAIL.
 
-PPE
-Work at Height
-Lifting
-Vehicular Safety
-Housekeeping
-Other
+Only report a spill if a spill is actually visible.
 
-STATUS must be one of:
+Only report a fall hazard when there is reasonable visual
+evidence.
 
-PASS
-CHECK_REQUIRED
-FAIL
+Do not confuse shadows, reflections or stains with hazards.
 
-RISK must be one of:
+For uncertain conditions use CHECK_REQUIRED.
 
-LOW
-MEDIUM
-HIGH
+CONFIDENCE:
 
-CONFIDENCE must be between 0 and 1.
+Return confidence between 0 and 1.
 
-Example:
+PASS examples:
 
-SUMMARY|||Worker in a container handling area with guardrails and lifting equipment visible.
+Hard hat clearly visible:
+PASS / LOW / high confidence.
 
-FINDING|||PPE|||Hard hat and safety vest visible|||PASS|||LOW|||0.95|||Worker is visibly wearing a hard hat and high visibility clothing.
+Safety vest clearly visible:
+PASS / LOW / high confidence.
 
-FINDING|||Work at Height|||Guardrail requires verification|||CHECK_REQUIRED|||MEDIUM|||Guardrail is visible around the work area. Verify that it is complete and secure.
+FAIL examples:
 
-FINDING|||Lifting|||Lifting activity requires verification|||CHECK_REQUIRED|||MEDIUM|||Lifting equipment is visible in the background. Verify that workers are not exposed to suspended loads.
+Worker clearly standing under a suspended load:
+FAIL / HIGH.
 
-Do not return JSON.
-Do not return markdown.
-Do not explain the answer.
-Only return SUMMARY and FINDING lines.
+Clearly missing required guardrail at an exposed edge:
+FAIL / HIGH.
+
+CHECK_REQUIRED examples:
+
+Guardrail visible but condition cannot be fully confirmed.
+
+Crane or lifting equipment visible but worker exposure
+cannot be confirmed.
+
+PPE requirement cannot be confirmed from the photograph.
+
+Return ONLY the structured JSON response requested by
+the system schema.
 `;
-
 }
 
 
 /*
  * ============================================================
- * PARSE EXACT FORMAT
+ * EXTRACT AI RESULT
  * ============================================================
  */
 
+function extractAIResponse(
+  result: any
+): any {
 
-function parseExact(
-  raw: string
-): {
-  summary: string;
-  findings: ParsedFinding[];
-} | null {
+  /*
+   * Workers AI JSON Mode normally returns:
+   *
+   * {
+   *   response: {...}
+   * }
+   *
+   * But handle several possible response forms.
+   */
 
-  const lines =
-    raw
-      .split(/\r?\n/)
-      .map(x => x.trim())
-      .filter(Boolean);
-
-
-  let summary =
-    "";
-
-
-  const summaryLine =
-    lines.find(
-      x =>
-        /^SUMMARY\|\|\|/i.test(x)
-    );
+  if (
+    result &&
+    typeof result.response === "object"
+  ) {
+    return result.response;
+  }
 
 
   if (
-    summaryLine
+    result &&
+    typeof result.result === "object"
+  ) {
+    return result.result;
+  }
+
+
+  if (
+    typeof result?.response === "string"
   ) {
 
-    summary =
-      text(
-        summaryLine
-          .split("|||")
-          .slice(1)
-          .join("|||"),
-        600
+    try {
+      return JSON.parse(
+        result.response
       );
+    } catch {
+      return null;
+    }
 
   }
+
+
+  if (
+    typeof result?.result === "string"
+  ) {
+
+    try {
+      return JSON.parse(
+        result.result
+      );
+    } catch {
+      return null;
+    }
+
+  }
+
+
+  return null;
+}
+
+
+/*
+ * ============================================================
+ * NORMALISE AI FINDINGS
+ * ============================================================
+ */
+
+function normaliseAIFindings(
+  data: any
+): {
+  summary: string;
+  findings: ParsedFinding[];
+} {
+
+  const summary =
+    text(
+      data?.summary ||
+      "Workplace scene analysed.",
+      600
+    );
+
+
+  const sourceFindings =
+    Array.isArray(
+      data?.findings
+    )
+      ? data.findings
+      : [];
 
 
   const findings:
@@ -653,341 +727,63 @@ function parseExact(
 
 
   for (
-    const line of lines
+    const item of sourceFindings
   ) {
 
     if (
-      !/^FINDING\|\|\|/i.test(line)
+      !item ||
+      typeof item !== "object"
     ) {
-
       continue;
-
     }
-
-
-    const parts =
-      line.split("|||");
-
-
-    if (
-      parts.length < 7
-    ) {
-
-      continue;
-
-    }
-
-
-    const category =
-      normaliseCategory(
-        parts[1],
-        parts[2],
-        parts.slice(6).join("|||")
-      );
 
 
     const title =
       text(
-        parts[2],
+        item.title ||
+        "AI finding requires review",
         300
-      );
-
-
-    const status =
-      normaliseStatus(
-        parts[3]
-      );
-
-
-    const risk =
-      normaliseRisk(
-        parts[4]
-      );
-
-
-    const confidence =
-      normaliseConfidence(
-        parts[5]
       );
 
 
     const observation =
       text(
-        parts
-          .slice(6)
-          .join("|||"),
+        item.observation ||
+        title,
         1000
       );
 
 
-    findings.push({
-
-      category,
-
-      title,
-
-      observation,
-
-      status,
-
-      risk_level:
-        risk,
-
-      confidence
-
-    });
-
-
-    if (
-      findings.length >= 6
-    ) {
-
-      break;
-
-    }
-
-  }
-
-
-  if (
-    findings.length === 0
-  ) {
-
-    return null;
-
-  }
-
-
-  return {
-
-    summary:
-      summary ||
-      "Workplace scene analysed.",
-
-    findings
-
-  };
-
-}
-
-
-/*
- * ============================================================
- * PARSE MARKDOWN / NATURAL LANGUAGE FALLBACK
- * ============================================================
- *
- * This handles the response your model previously returned:
- *
- * **Summary** Worker...
- *
- * **PPE**:
- * Category: PPE
- * Title: ...
- * Status: PASS
- * Risk: LOW
- * Confidence: 0.95
- *
- * ============================================================
- */
-
-
-function parseFallback(
-  raw: string
-): {
-  summary: string;
-  findings: ParsedFinding[];
-} | null {
-
-  const clean =
-    raw
-      .replace(/\*\*/g, "")
-      .replace(/__/g, "")
-      .replace(/\r?\n/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-
-  if (
-    !clean
-  ) {
-
-    return null;
-
-  }
-
-
-  let summary =
-    "Workplace scene analysed.";
-
-
-  const summaryMatch =
-    clean.match(
-      /Summary\s+(.+?)(?=\s+(?:Finding\s+)?(?:PPE|Work at Height|Lifting|Vehicular Safety|Housekeeping)\s*:)/i
-    );
-
-
-  if (
-    summaryMatch
-  ) {
-
-    summary =
-      text(
-        summaryMatch[1],
-        600
-      );
-
-  }
-
-
-  /*
-   * Find category blocks.
-   */
-
-  const categoryRegex =
-    /(?:Finding\s+)?(PPE|Work at Height|Lifting|Vehicular Safety|Housekeeping)\s*:/gi;
-
-
-  const matches =
-    [...clean.matchAll(categoryRegex)];
-
-
-  if (
-    matches.length === 0
-  ) {
-
-    return null;
-
-  }
-
-
-  const findings:
-    ParsedFinding[] = [];
-
-
-  for (
-    let i = 0;
-    i < matches.length &&
-    findings.length < 6;
-    i++
-  ) {
-
-    const match =
-      matches[i];
-
-
-    const category =
+    let category =
       normaliseCategory(
-        match[1]
+        item.category ||
+        "",
+        title,
+        observation
       );
 
 
-    const start =
-      (
-        match.index || 0
-      ) +
-      match[0].length;
-
-
-    const end =
-      i + 1 <
-      matches.length
-        ? (
-            matches[i + 1].index ||
-            clean.length
-          )
-        : clean.length;
-
-
-    const block =
-      clean
-        .slice(
-          start,
-          end
-        )
-        .trim();
-
-
-    const titleMatch =
-      block.match(
-        /Title\s*:\s*(.*?)(?=\s*\+\s*Status:|\s+Status:|\s*$)/i
-      );
-
-
-    const statusMatch =
-      block.match(
-        /Status\s*:\s*(PASS|FAIL|CHECK_REQUIRED)/i
-      );
-
-
-    const riskMatch =
-      block.match(
-        /Risk\s*:\s*(LOW|MEDIUM|HIGH)/i
-      );
-
-
-    const confidenceMatch =
-      block.match(
-        /Confidence\s*:\s*([0-9.]+)/i
-      );
-
-
-    const categoryMatch =
-      block.match(
-        /Category\s*:\s*([^+]+?)(?=\s*\+\s*Title:|\s+Title:|\s*$)/i
-      );
-
-
-    const title =
-      text(
-        titleMatch?.[1] ||
-        block.split("+")[0],
-        300
-      );
-
-
-    let observation =
-      text(
-        block
-          .split(
-            "+ Category:"
-          )[0]
-          .split(
-            "Category:"
-          )[0],
-        1000
-      );
-
-
-    if (
-      !observation
-    ) {
-
-      observation =
-        title;
-
-    }
-
-
-    let status =
+    const status =
       normaliseStatus(
-        statusMatch?.[1] ||
-        "CHECK_REQUIRED"
+        item.status
       );
 
 
     const risk =
       normaliseRisk(
-        riskMatch?.[1] ||
-        "MEDIUM"
+        item.risk_level
       );
 
 
     const confidence =
       normaliseConfidence(
-        confidenceMatch?.[1] ||
-        0.5
+        item.confidence
       );
 
+
+    /*
+     * Additional safety corrections.
+     */
 
     const combined =
       `${title} ${observation}`
@@ -995,36 +791,8 @@ function parseFallback(
 
 
     /*
-     * Safety correction.
-     */
-
-    if (
-      (
-        combined.includes(
-          "requires verification"
-        ) ||
-        combined.includes(
-          "verify"
-        ) ||
-        combined.includes(
-          "uncertain"
-        ) ||
-        combined.includes(
-          "not clear"
-        )
-      ) &&
-      status === "PASS"
-    ) {
-
-      status =
-        "CHECK_REQUIRED";
-
-    }
-
-
-    /*
-     * A clearly visible vest should not become
-     * a missing-vest failure.
+     * If the AI says the vest is visible,
+     * it must not become a missing-vest finding.
      */
 
     if (
@@ -1037,42 +805,122 @@ function parseFallback(
           "vest visible"
         ) ||
         combined.includes(
-          "high visibility"
+          "high visibility clothing"
         ) ||
         combined.includes(
-          "high-visibility"
+          "high-visibility clothing"
+        ) ||
+        combined.includes(
+          "wearing a hard hat"
         )
       )
     ) {
 
-      status =
-        "PASS";
+      if (
+        status !== "FAIL"
+      ) {
 
+        findings.push({
+
+          category,
+
+          title,
+
+          observation,
+
+          status:
+            "PASS",
+
+          risk_level:
+            "LOW",
+
+          confidence
+
+        });
+
+        continue;
+      }
     }
 
 
     /*
-     * A visible guardrail should not become
-     * "no guardrail".
+     * If a guardrail is visibly present,
+     * don't allow "no guardrail" type logic.
      */
+
+    let correctedStatus =
+      status;
+
 
     if (
       category === "Work at Height" &&
       combined.includes(
         "guardrail"
       ) &&
+      (
+        combined.includes(
+          "visible"
+        ) ||
+        combined.includes(
+          "present"
+        )
+      ) &&
       !combined.includes(
         "missing"
       ) &&
       !combined.includes(
-        "no visible"
-      ) &&
-      status === "FAIL"
+        "no guardrail"
+      )
     ) {
 
-      status =
-        "CHECK_REQUIRED";
+      if (
+        status === "FAIL" &&
+        combined.includes(
+          "verify"
+        )
+      ) {
 
+        correctedStatus =
+          "CHECK_REQUIRED";
+      }
+    }
+
+
+    /*
+     * Lifting:
+     *
+     * Equipment visible alone should normally
+     * be CHECK_REQUIRED rather than FAIL.
+     */
+
+    if (
+      category === "Lifting" &&
+      (
+        combined.includes(
+          "equipment is visible"
+        ) ||
+        combined.includes(
+          "crane is visible"
+        ) ||
+        combined.includes(
+          "lifting equipment is visible"
+        )
+      ) &&
+      !combined.includes(
+        "suspended load"
+      ) &&
+      !combined.includes(
+        "worker is under"
+      )
+    ) {
+
+      if (
+        correctedStatus === "FAIL"
+      ) {
+
+        correctedStatus =
+          "CHECK_REQUIRED";
+      }
     }
 
 
@@ -1084,7 +932,8 @@ function parseFallback(
 
       observation,
 
-      status,
+      status:
+        correctedStatus,
 
       risk_level:
         risk,
@@ -1093,112 +942,52 @@ function parseFallback(
 
     });
 
+
+    if (
+      findings.length >= 6
+    ) {
+      break;
+    }
+  }
+
+
+  /*
+   * If AI returned nothing, create a review item.
+   */
+
+  if (
+    findings.length === 0
+  ) {
+
+    findings.push({
+
+      category:
+        "Other",
+
+      title:
+        "AI analysis requires review",
+
+      observation:
+        "The AI did not return a usable safety finding. Physical verification is required.",
+
+      status:
+        "CHECK_REQUIRED",
+
+      risk_level:
+        "MEDIUM",
+
+      confidence:
+        0.5
+
+    });
+
   }
 
 
   return {
-
     summary,
-
     findings
-
   };
-
-}
-
-
-/*
- * ============================================================
- * PARSE AI RESPONSE
- * ============================================================
- */
-
-
-function parseAiResponse(
-  raw: string
-): {
-  summary: string;
-  findings: ParsedFinding[];
-} {
-
-  /*
-   * First try the exact format.
-   */
-
-  const exact =
-    parseExact(
-      raw
-    );
-
-
-  if (
-    exact
-  ) {
-
-    return exact;
-
-  }
-
-
-  /*
-   * Then handle the natural language format.
-   */
-
-  const fallback =
-    parseFallback(
-      raw
-    );
-
-
-  if (
-    fallback
-  ) {
-
-    return fallback;
-
-  }
-
-
-  /*
-   * Last resort.
-   */
-
-  return {
-
-    summary:
-      "The AI returned an unstructured observation.",
-
-    findings: [
-
-      {
-
-        category:
-          "Other",
-
-        title:
-          "AI analysis requires review",
-
-        observation:
-          text(
-            raw,
-            1000
-          ),
-
-        status:
-          "CHECK_REQUIRED",
-
-        risk_level:
-          "MEDIUM",
-
-        confidence:
-          0.5
-
-      }
-
-    ]
-
-  };
-
 }
 
 
@@ -1207,7 +996,6 @@ function parseAiResponse(
  * LOAD SAFETY CHECKS
  * ============================================================
  */
-
 
 async function loadSafetyChecks(
   env: Env
@@ -1234,20 +1022,15 @@ async function loadSafetyChecks(
       .all<SafetyCheck>();
 
 
-  return (
-    result.results ||
-    []
-  );
-
+  return result.results || [];
 }
 
 
 /*
  * ============================================================
- * MATCH FINDING TO SAFETY CHECK
+ * MATCH SAFETY CHECK
  * ============================================================
  */
-
 
 function matchSafetyCheck(
   finding: ParsedFinding,
@@ -1257,9 +1040,7 @@ function matchSafetyCheck(
   if (
     checks.length === 0
   ) {
-
     return null;
-
   }
 
 
@@ -1269,7 +1050,7 @@ function matchSafetyCheck(
 
 
   /*
-   * 1. Exact category match.
+   * First restrict to the same category.
    */
 
   const categoryMatches =
@@ -1281,18 +1062,11 @@ function matchSafetyCheck(
     );
 
 
-  if (
-    categoryMatches.length === 1
-  ) {
+  const candidates =
+    categoryMatches.length > 0
+      ? categoryMatches
+      : checks;
 
-    return categoryMatches[0];
-
-  }
-
-
-  /*
-   * 2. Keyword matching.
-   */
 
   const searchText =
     `${finding.title} ${finding.observation}`
@@ -1303,22 +1077,17 @@ function matchSafetyCheck(
     SafetyCheck | null =
       null;
 
-
   let bestScore =
-    0;
+    -1;
 
 
   for (
-    const check of
-      categoryMatches.length > 0
-        ? categoryMatches
-        : checks
+    const check of candidates
   ) {
 
     const keywords =
       String(
-        check.keywords ||
-        ""
+        check.keywords || ""
       )
         .toLowerCase()
         .split(
@@ -1334,27 +1103,8 @@ function matchSafetyCheck(
       0;
 
 
-    for (
-      const keyword of
-        keywords
-    ) {
-
-      if (
-        searchText.includes(
-          keyword
-        )
-      ) {
-
-        score +=
-          2;
-
-      }
-
-    }
-
-
     /*
-     * Category gets a strong weighting.
+     * Category match.
      */
 
     if (
@@ -1363,9 +1113,54 @@ function matchSafetyCheck(
         === category
     ) {
 
-      score +=
-        5;
+      score += 10;
+    }
 
+
+    /*
+     * Keyword match.
+     */
+
+    for (
+      const keyword of keywords
+    ) {
+
+      if (
+        keyword.length >= 2 &&
+        searchText.includes(
+          keyword
+        )
+      ) {
+
+        score += 3;
+      }
+    }
+
+
+    /*
+     * Check question terms.
+     */
+
+    const questionWords =
+      check.check_question
+        .toLowerCase()
+        .split(/\W+/)
+        .filter(
+          word =>
+            word.length >= 4
+        );
+
+
+    for (
+      const word of questionWords
+    ) {
+
+      if (
+        searchText.includes(word)
+      ) {
+
+        score += 0.25;
+      }
     }
 
 
@@ -1378,45 +1173,19 @@ function matchSafetyCheck(
 
       best =
         check;
-
     }
-
   }
 
 
-  if (
-    best
-  ) {
-
-    return best;
-
-  }
-
-
-  /*
-   * 3. Category fallback.
-   */
-
-  if (
-    categoryMatches.length > 0
-  ) {
-
-    return categoryMatches[0];
-
-  }
-
-
-  return null;
-
+  return best;
 }
 
 
 /*
  * ============================================================
- * ATTACH WSH CHECKS
+ * ATTACH WSH CHECK
  * ============================================================
  */
-
 
 function attachSafetyChecks(
   findings: ParsedFinding[],
@@ -1438,7 +1207,6 @@ function attachSafetyChecks(
       ) {
 
         return finding;
-
       }
 
 
@@ -1462,19 +1230,16 @@ function attachSafetyChecks(
           check.source_url
 
       };
-
     }
   );
-
 }
 
 
 /*
  * ============================================================
- * OVERALL STATUS
+ * CALCULATE OVERALL RESULT
  * ============================================================
  */
-
 
 function calculateOverall(
   findings: ParsedFinding[]
@@ -1482,30 +1247,27 @@ function calculateOverall(
 
   if (
     findings.some(
-      x =>
-        x.status === "FAIL"
+      finding =>
+        finding.status === "FAIL"
     )
   ) {
 
     return "ATTENTION";
-
   }
 
 
   if (
     findings.some(
-      x =>
-        x.status === "CHECK_REQUIRED"
+      finding =>
+        finding.status === "CHECK_REQUIRED"
     )
   ) {
 
     return "CHECK_REQUIRED";
-
   }
 
 
   return "PASS";
-
 }
 
 
@@ -1515,7 +1277,6 @@ function calculateOverall(
  * ============================================================
  */
 
-
 async function saveInspection(
   env: Env,
   location: string,
@@ -1523,23 +1284,16 @@ async function saveInspection(
   photo: File,
   findings: ParsedFinding[],
   overall: string
-): Promise<{
-  inspectionId: string;
-  inspectionNo: string;
-  photoId: string;
-}> {
+) {
 
   const inspectionId =
     newId();
 
-
   const inspectionNo =
     inspectionNumber();
 
-
   const photoId =
     newId();
-
 
   const createdAt =
     new Date()
@@ -1548,7 +1302,7 @@ async function saveInspection(
 
   /*
    * ----------------------------------------------------------
-   * 1. INSPECTION
+   * INSPECTIONS
    * ----------------------------------------------------------
    */
 
@@ -1567,26 +1321,19 @@ async function saveInspection(
       `
     )
     .bind(
-
       inspectionId,
-
       inspectionNo,
-
       location,
-
       inspector,
-
       createdAt,
-
       overall
-
     )
     .run();
 
 
   /*
    * ----------------------------------------------------------
-   * 2. SAVE PHOTO TO R2
+   * R2 PHOTO
    * ----------------------------------------------------------
    */
 
@@ -1621,7 +1368,7 @@ async function saveInspection(
 
   /*
    * ----------------------------------------------------------
-   * 3. PHOTO RECORD
+   * INSPECTION PHOTO
    * ----------------------------------------------------------
    */
 
@@ -1640,27 +1387,19 @@ async function saveInspection(
       `
     )
     .bind(
-
       photoId,
-
       inspectionId,
-
       objectKey,
-
       photo.name,
-
-      photo.type ||
-        "image/jpeg",
-
+      photo.type || "image/jpeg",
       createdAt
-
     )
     .run();
 
 
   /*
    * ----------------------------------------------------------
-   * 4. FINDINGS
+   * FINDINGS
    * ----------------------------------------------------------
    */
 
@@ -1696,54 +1435,35 @@ async function saveInspection(
         `
       )
       .bind(
-
         findingId,
-
         inspectionId,
-
         photoId,
-
         finding.category,
-
         finding.title,
-
         finding.observation,
-
         finding.status,
-
         finding.risk_level,
-
         finding.confidence,
-
-        finding.check_id ||
-          null,
-
-        finding.source_title ||
-          null,
-
-        finding.source_url ||
-          null,
-
+        finding.check_id || null,
+        finding.source_title || null,
+        finding.source_url || null,
         createdAt
-
       )
       .run();
 
 
     /*
      * --------------------------------------------------------
-     * 5. CORRECTIVE ACTION
-     * --------------------------------------------------------
+     * CORRECTIVE ACTION
      *
-     * Automatically create an OPEN action only for FAIL.
+     * Only create automatically for FAIL.
      *
-     * CHECK_REQUIRED is left for the inspector to verify.
+     * CHECK_REQUIRED requires inspector verification first.
      * --------------------------------------------------------
      */
 
     if (
-      finding.status ===
-      "FAIL"
+      finding.status === "FAIL"
     ) {
 
       await env.SAFETY_DB
@@ -1763,50 +1483,33 @@ async function saveInspection(
           `
         )
         .bind(
-
           newId(),
-
           findingId,
-
           `Correct the unsafe condition identified: ${finding.title}. ${finding.observation}`,
-
           null,
-
           null,
-
           "OPEN",
-
           createdAt,
-
           null
-
         )
         .run();
-
     }
-
   }
 
 
   return {
-
     inspectionId,
-
     inspectionNo,
-
     photoId
-
   };
-
 }
 
 
 /*
  * ============================================================
- * POST /api/analyze
+ * ANALYSE PHOTO
  * ============================================================
  */
-
 
 async function analyze(
   request: Request,
@@ -1834,14 +1537,11 @@ async function analyze(
         },
         400
       );
-
     }
 
 
     if (
-      !photo.type.startsWith(
-        "image/"
-      )
+      !photo.type.startsWith("image/")
     ) {
 
       return json(
@@ -1851,12 +1551,11 @@ async function analyze(
         },
         400
       );
-
     }
 
 
     /*
-     * Maximum 8 MB.
+     * 8 MB maximum.
      */
 
     if (
@@ -1871,14 +1570,13 @@ async function analyze(
         },
         400
       );
-
     }
 
 
     const location =
       text(
         form.get("location") ||
-          "Unspecified",
+        "Unspecified",
         200
       );
 
@@ -1886,14 +1584,14 @@ async function analyze(
     const inspector =
       text(
         form.get("inspector") ||
-          "Inspector",
+        "Inspector",
         200
       );
 
 
     /*
      * --------------------------------------------------------
-     * Convert photo for Vision model.
+     * IMAGE
      * --------------------------------------------------------
      */
 
@@ -1905,7 +1603,9 @@ async function analyze(
 
     /*
      * --------------------------------------------------------
-     * AI
+     * WORKERS AI
+     *
+     * JSON Mode is supported by this model.
      * --------------------------------------------------------
      */
 
@@ -1916,16 +1616,14 @@ async function analyze(
           messages: [
 
             {
-              role:
-                "system",
+              role: "system",
 
               content:
-                "You are a careful Singapore workplace safety inspection assistant. Analyse only visible evidence."
+                "You are a careful Singapore workplace safety inspection assistant. Analyse only visible evidence and return the requested structured result."
             },
 
             {
-              role:
-                "user",
+              role: "user",
 
               content:
                 buildPrompt()
@@ -1939,50 +1637,65 @@ async function analyze(
             0.05,
 
           max_tokens:
-            1400
+            1600,
+
+          response_format: {
+            type:
+              "json_schema",
+
+            json_schema:
+              AI_RESPONSE_SCHEMA
+          }
 
         } as any
       );
 
 
-    const raw =
-      extractAiText(
+    console.log(
+      "Workers AI result:",
+      JSON.stringify(
+        aiResult
+      )
+    );
+
+
+    /*
+     * --------------------------------------------------------
+     * EXTRACT JSON
+     * --------------------------------------------------------
+     */
+
+    const aiData =
+      extractAIResponse(
         aiResult
       );
 
 
-    console.log(
-      "AI raw response:",
-      raw
-    );
-
-
     if (
-      !raw
+      !aiData
     ) {
 
       throw new Error(
-        "Workers AI returned an empty response."
+        "Workers AI returned an invalid structured response."
       );
-
     }
 
 
     /*
      * --------------------------------------------------------
-     * Parse
+     * NORMALISE FINDINGS
      * --------------------------------------------------------
      */
 
     const parsed =
-      parseAiResponse(
-        raw
+      normaliseAIFindings(
+        aiData
       );
 
 
     /*
      * --------------------------------------------------------
-     * Match against safety_checks D1 table
+     * LOAD WSH SAFETY CHECKS
      * --------------------------------------------------------
      */
 
@@ -1991,6 +1704,12 @@ async function analyze(
         env
       );
 
+
+    /*
+     * --------------------------------------------------------
+     * MATCH WSH CHECKS
+     * --------------------------------------------------------
+     */
 
     const findings =
       attachSafetyChecks(
@@ -2001,7 +1720,7 @@ async function analyze(
 
     /*
      * --------------------------------------------------------
-     * Overall result
+     * OVERALL RESULT
      * --------------------------------------------------------
      */
 
@@ -2013,30 +1732,24 @@ async function analyze(
 
     /*
      * --------------------------------------------------------
-     * Save
+     * SAVE TO D1
      * --------------------------------------------------------
      */
 
     const saved =
       await saveInspection(
         env,
-
         location,
-
         inspector,
-
         photo,
-
         findings,
-
         overall
-
       );
 
 
     /*
      * --------------------------------------------------------
-     * Return
+     * RESPONSE
      * --------------------------------------------------------
      */
 
@@ -2053,6 +1766,10 @@ async function analyze(
 
       photo_id:
         saved.photoId,
+
+      location,
+
+      inspector,
 
       overall_result:
         overall,
@@ -2083,22 +1800,18 @@ async function analyze(
         detail:
           error?.message ||
           String(error)
-
       },
       500
     );
-
   }
-
 }
 
 
 /*
  * ============================================================
- * GET /api/inspections
+ * RECENT INSPECTIONS
  * ============================================================
  */
-
 
 async function getInspections(
   env: Env
@@ -2126,10 +1839,8 @@ async function getInspections(
 
 
     return json({
-
       inspections:
         result.results || []
-
     });
 
 
@@ -2151,22 +1862,18 @@ async function getInspections(
         detail:
           error?.message ||
           String(error)
-
       },
       500
     );
-
   }
-
 }
 
 
 /*
  * ============================================================
- * GET /api/inspections/:id
+ * SINGLE INSPECTION
  * ============================================================
  */
-
 
 async function getInspection(
   env: Env,
@@ -2208,7 +1915,6 @@ async function getInspection(
         },
         404
       );
-
     }
 
 
@@ -2296,16 +2002,13 @@ async function getInspection(
       inspection,
 
       findings:
-        findingsResult.results ||
-        [],
+        findingsResult.results || [],
 
       photos:
-        photosResult.results ||
-        [],
+        photosResult.results || [],
 
       corrective_actions:
-        actionsResult.results ||
-        []
+        actionsResult.results || []
 
     });
 
@@ -2328,13 +2031,10 @@ async function getInspection(
         detail:
           error?.message ||
           String(error)
-
       },
       500
     );
-
   }
-
 }
 
 
@@ -2343,7 +2043,6 @@ async function getInspection(
  * HEALTH CHECK
  * ============================================================
  */
-
 
 async function health(
   env: Env
@@ -2374,6 +2073,7 @@ async function health(
 
     });
 
+
   } catch (
     error: any
   ) {
@@ -2386,22 +2086,18 @@ async function health(
         error:
           error?.message ||
           String(error)
-
       },
       500
     );
-
   }
-
 }
 
 
 /*
  * ============================================================
- * FETCH HANDLER
+ * FETCH
  * ============================================================
  */
-
 
 export default {
 
@@ -2423,15 +2119,13 @@ export default {
      */
 
     if (
-      request.method ===
-      "OPTIONS"
+      request.method === "OPTIONS"
     ) {
 
       return new Response(
         null,
         {
-          status:
-            204,
+          status: 204,
 
           headers: {
 
@@ -2447,7 +2141,6 @@ export default {
           }
         }
       );
-
     }
 
 
@@ -2465,13 +2158,12 @@ export default {
       return health(
         env
       );
-
     }
 
 
     /*
      * --------------------------------------------------------
-     * ANALYSE
+     * ANALYSE PHOTO
      * --------------------------------------------------------
      */
 
@@ -2481,8 +2173,7 @@ export default {
     ) {
 
       if (
-        request.method !==
-        "POST"
+        request.method !== "POST"
       ) {
 
         return json(
@@ -2492,7 +2183,6 @@ export default {
           },
           405
         );
-
       }
 
 
@@ -2500,7 +2190,6 @@ export default {
         request,
         env
       );
-
     }
 
 
@@ -2516,8 +2205,7 @@ export default {
     ) {
 
       if (
-        request.method !==
-        "GET"
+        request.method !== "GET"
       ) {
 
         return json(
@@ -2527,14 +2215,12 @@ export default {
           },
           405
         );
-
       }
 
 
       return getInspections(
         env
       );
-
     }
 
 
@@ -2544,35 +2230,33 @@ export default {
      * --------------------------------------------------------
      */
 
-    const prefix =
+    const inspectionPrefix =
       "/api/inspections/";
 
 
     if (
       url.pathname.startsWith(
-        prefix
+        inspectionPrefix
       )
     ) {
 
-      const id =
+      const inspectionId =
         decodeURIComponent(
           url.pathname.slice(
-            prefix.length
+            inspectionPrefix.length
           )
         );
 
 
       if (
-        id
+        inspectionId
       ) {
 
         return getInspection(
           env,
-          id
+          inspectionId
         );
-
       }
-
     }
 
 
@@ -2600,17 +2284,14 @@ export default {
           "ASSETS ERROR:",
           error
         );
-
       }
-
     }
 
 
     return new Response(
       "Safety Inspection AI",
       {
-        status:
-          200,
+        status: 200,
 
         headers: {
           "Content-Type":
@@ -2618,7 +2299,6 @@ export default {
         }
       }
     );
-
   }
 
 };
