@@ -1,4 +1,4 @@
-name = "safety-inspection-ai"
+name = "depot-safety"
 main = "src/index.ts"
 compatibility_date = "2026-08-13"
 
@@ -11,7 +11,7 @@ binding = "AI"
 [[d1_databases]]
 binding = "SAFETY_DB"
 database_name = "safety-inspection-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "137374f9-5a82-47c7-be57-71bf73b15739"
 migrations_dir = "migrations"
 
 [[r2_buckets]]
