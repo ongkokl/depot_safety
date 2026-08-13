@@ -4,31 +4,33 @@ export interface Env {
 }
 
 /*
- * ============================================================
- * DEPOT SAFETY INSPECTION AI
- * ============================================================
- *
- * Cloudflare Worker
- *
- * AI:
- *   @cf/meta/llama-3.2-11b-vision-instruct
- *
- * Database:
- *   D1
- *
- * Main endpoints:
- *
- *   GET  /api/health
- *   POST /api/analyze
- *   POST /api/analyse
- *   GET  /api/inspections
- *   GET  /api/inspections/:id
- *   GET  /api/safety-checks
- *
- * Vectorize is NOT required for this version.
- *
- * ============================================================
- */
+============================================================
+DEPOT SAFETY INSPECTION AI
+============================================================
+
+Cloudflare Worker
+
+AI MODEL:
+@cf/meta/llama-3.2-11b-vision-instruct
+
+DATABASE:
+Cloudflare D1
+
+MAIN API:
+
+GET  /api/health
+GET  /api/safety-checks
+GET  /api/inspections
+GET  /api/inspections/:id
+
+POST /api/analyze
+POST /api/analyse
+
+Vectorize is NOT required for this version.
+
+============================================================
+*/
+
 
 const MODEL =
   "@cf/meta/llama-3.2-11b-vision-instruct";
@@ -38,10 +40,10 @@ const WSH_DEFAULT_URL =
 
 
 /*
- * ============================================================
- * TYPES
- * ============================================================
- */
+============================================================
+TYPES
+============================================================
+*/
 
 interface SafetyCheck {
   id: string;
@@ -54,28 +56,37 @@ interface SafetyCheck {
   active: number;
 }
 
+
 interface Finding {
   category: string;
   title: string;
   observation: string;
+
   status:
     | "PASS"
     | "FAIL"
     | "CHECK_REQUIRED";
+
   risk_level:
     | "LOW"
     | "MEDIUM"
     | "HIGH";
+
   confidence: number;
+
   check_id: string;
+
   source_title: string;
+
   source_url: string;
 }
+
 
 interface AIResult {
   scene_summary: string;
   findings: Finding[];
 }
+
 
 interface AnalyseRequest {
   image?: string;
@@ -87,38 +98,46 @@ interface AnalyseRequest {
 
 
 /*
- * ============================================================
- * CORS
- * ============================================================
- */
+============================================================
+CORS
+============================================================
+*/
 
 function corsHeaders(): HeadersInit {
+
   return {
+
     "Access-Control-Allow-Origin": "*",
+
     "Access-Control-Allow-Methods":
       "GET, POST, OPTIONS",
+
     "Access-Control-Allow-Headers":
       "Content-Type, Authorization",
+
   };
 }
 
 
 /*
- * ============================================================
- * JSON RESPONSE
- * ============================================================
- */
+============================================================
+JSON RESPONSE
+============================================================
+*/
 
 function jsonResponse(
   data: unknown,
   status = 200
 ): Response {
+
   return new Response(
     JSON.stringify(data),
     {
+
       status,
 
       headers: {
+
         "Content-Type":
           "application/json; charset=UTF-8",
 
@@ -126,20 +145,24 @@ function jsonResponse(
           "no-store",
 
         ...corsHeaders(),
+
       },
+
     }
   );
 }
 
 
 /*
- * ============================================================
- * GENERAL HELPERS
- * ============================================================
- */
+============================================================
+HELPERS
+============================================================
+*/
 
 function nowISO(): string {
+
   return new Date().toISOString();
+
 }
 
 
@@ -151,13 +174,18 @@ function cleanString(
   if (
     typeof value !== "string"
   ) {
+
     return fallback;
+
   }
+
 
   const result =
     value.trim();
 
+
   return result || fallback;
+
 }
 
 
@@ -165,30 +193,32 @@ function clampConfidence(
   value: unknown
 ): number {
 
-  const number =
+  const n =
     Number(value);
 
+
   if (
-    !Number.isFinite(number)
+    !Number.isFinite(n)
   ) {
+
     return 0.5;
+
   }
+
 
   return Math.max(
     0,
-    Math.min(
-      1,
-      number
-    )
+    Math.min(1, n)
   );
+
 }
 
 
 /*
- * ============================================================
- * NORMALISE STATUS
- * ============================================================
- */
+============================================================
+NORMALISE STATUS
+============================================================
+*/
 
 function normalizeStatus(
   value: unknown
@@ -199,31 +229,40 @@ function normalizeStatus(
       .trim()
       .toUpperCase();
 
+
   if (
     text === "FAIL" ||
     text === "FAILED" ||
-    text === "UNSAFE"
+    text === "UNSAFE" ||
+    text === "NOT SAFE"
   ) {
+
     return "FAIL";
+
   }
+
 
   if (
     text === "PASS" ||
     text === "PASSED" ||
     text === "SAFE"
   ) {
+
     return "PASS";
+
   }
 
+
   return "CHECK_REQUIRED";
+
 }
 
 
 /*
- * ============================================================
- * NORMALISE RISK
- * ============================================================
- */
+============================================================
+NORMALISE RISK
+============================================================
+*/
 
 function normalizeRisk(
   value: unknown
@@ -234,27 +273,35 @@ function normalizeRisk(
       .trim()
       .toUpperCase();
 
+
   if (
     text === "HIGH"
   ) {
+
     return "HIGH";
+
   }
+
 
   if (
     text === "LOW"
   ) {
+
     return "LOW";
+
   }
 
+
   return "MEDIUM";
+
 }
 
 
 /*
- * ============================================================
- * NORMALISE CATEGORY
- * ============================================================
- */
+============================================================
+NORMALISE CATEGORY
+============================================================
+*/
 
 function normalizeCategory(
   value: unknown
@@ -264,39 +311,24 @@ function normalizeCategory(
     String(value || "")
       .trim();
 
+
   if (!text) {
+
     return "Other";
+
   }
 
+
   return text;
+
 }
 
 
 /*
- * ============================================================
- * IMAGE NORMALISATION
- * ============================================================
- *
- * Frontend sends:
- *
- * data:image/jpeg;base64,...
- *
- * Cloudflare Vision accepts the image as a string.
- *
- * IMPORTANT:
- *
- * image must NOT be:
- *
- * [
- *   "data:image/jpeg..."
- * ]
- *
- * It must be:
- *
- * "data:image/jpeg..."
- *
- * ============================================================
- */
+============================================================
+IMAGE NORMALISATION
+============================================================
+*/
 
 function normalizeImage(
   image: string,
@@ -306,29 +338,34 @@ function normalizeImage(
   const value =
     image.trim();
 
+
   if (!value) {
+
     throw new Error(
       "No image was supplied."
     );
+
   }
 
 
   /*
-   * Already a data URL.
-   */
+  Already data URL
+  */
 
   if (
     value.startsWith(
       "data:image/"
     )
   ) {
+
     return value;
+
   }
 
 
   /*
-   * Image URL.
-   */
+  HTTP URL
+  */
 
   if (
     value.startsWith(
@@ -338,29 +375,23 @@ function normalizeImage(
       "http://"
     )
   ) {
+
     return value;
+
   }
 
 
   /*
-   * Raw Base64.
-   */
+  Raw base64
+  */
 
-  let mime =
-    contentType;
-
-  if (
-    !mime.startsWith(
+  const mime =
+    contentType.startsWith(
       "image/"
     )
-  ) {
-    mime =
-      "image/jpeg";
-  }
+      ? contentType
+      : "image/jpeg";
 
-  /*
-   * Remove accidental data URL prefix.
-   */
 
   const base64 =
     value.replace(
@@ -368,17 +399,19 @@ function normalizeImage(
       ""
     );
 
+
   return (
     `data:${mime};base64,${base64}`
   );
+
 }
 
 
 /*
- * ============================================================
- * DATABASE TABLE COLUMNS
- * ============================================================
- */
+============================================================
+DATABASE COLUMNS
+============================================================
+*/
 
 async function getTableColumns(
   db: D1Database,
@@ -396,6 +429,7 @@ async function getTableColumns(
           name: string;
         }>();
 
+
     return (
       result.results || []
     ).map(
@@ -405,33 +439,23 @@ async function getTableColumns(
   } catch (error) {
 
     console.error(
-      `Unable to read table ${tableName}:`,
+      `Unable to read ${tableName}:`,
       error
     );
 
+
     return [];
+
   }
+
 }
 
 
 /*
- * ============================================================
- * LOAD WSH SAFETY CHECKS
- * ============================================================
- *
- * Your safety_checks table:
- *
- * id
- * category
- * check_question
- * guidance
- * source_title
- * source_url
- * keywords
- * active
- *
- * ============================================================
- */
+============================================================
+LOAD SAFETY CHECKS
+============================================================
+*/
 
 async function loadSafetyChecks(
   db: D1Database
@@ -459,6 +483,7 @@ async function loadSafetyChecks(
         )
         .all<SafetyCheck>();
 
+
     return (
       result.results || []
     );
@@ -470,30 +495,36 @@ async function loadSafetyChecks(
       error
     );
 
+
     return [];
+
   }
+
 }
 
 
 /*
- * ============================================================
- * BUILD SAFETY CHECK PROMPT
- * ============================================================
- */
+============================================================
+BUILD SAFETY CHECK TEXT
+============================================================
+*/
 
 function buildSafetyCheckText(
   checks: SafetyCheck[]
 ): string {
 
-  if (!checks.length) {
+  if (
+    !checks.length
+  ) {
 
     return `
-No active safety checks were found in D1.
+No active safety checks were found.
 
-Use general visible workplace safety principles only.
+Use only general visible workplace safety principles.
 
-Do NOT invent specific WSH requirements.
+Do not invent specific WSH requirements.
 `;
+
   }
 
 
@@ -502,9 +533,9 @@ Do NOT invent specific WSH requirements.
       (check, index) => {
 
         return `
---------------------------------------------------
+==================================================
 SAFETY CHECK ${index + 1}
---------------------------------------------------
+==================================================
 
 CHECK ID:
 ${check.id}
@@ -527,17 +558,19 @@ ${check.source_url}
 KEYWORDS:
 ${check.keywords || ""}
 `;
+
       }
     )
     .join("\n");
+
 }
 
 
 /*
- * ============================================================
- * AI PROMPT
- * ============================================================
- */
+============================================================
+AI PROMPT
+============================================================
+*/
 
 function buildAIPrompt(
   checks: SafetyCheck[]
@@ -545,102 +578,77 @@ function buildAIPrompt(
 
   return `
 You are an AI workplace safety inspection assistant
-supporting a safety inspector in Singapore.
+for a Singapore container depot / port environment.
 
 Analyse the uploaded workplace photograph.
 
-The photograph may show:
-- container depot activity
-- trucks
-- containers
-- workers
-- lifting equipment
-- traffic routes
-- housekeeping
-- PPE
-- work at height
-- electrical equipment
-- fire safety
-- storage
-- other workplace conditions
+Your task is to identify safety conditions that can
+actually be observed from the photograph.
 
-Your task is to identify safety checks that are relevant
-to what is actually visible in the photograph.
+Then match those conditions against the supplied
+WSH safety check library.
 
 IMPORTANT SAFETY RULES:
 
-1. Only report things that are visible or reasonably supported
-   by the photograph.
+1. Only report things visible in the photograph.
 
 2. Do not invent hazards.
 
-3. Do not assume that something is unsafe just because it
-   cannot be seen.
+3. Do not assume something is unsafe simply because
+   it cannot be seen.
 
-4. If the photograph is insufficient to determine whether
-   something is safe, use CHECK_REQUIRED.
+4. If a condition cannot be confirmed from the photo,
+   use CHECK_REQUIRED.
 
-5. Use FAIL only when a clearly unsafe condition is visible.
+5. Use FAIL only when a clearly unsafe condition is
+   visibly present.
 
-6. Use PASS only when there is reasonable visual evidence
-   that the particular condition is satisfactory.
+6. Use PASS only when there is reasonable visual
+   evidence that the condition is satisfactory.
 
-7. Do not claim that the whole workplace is compliant.
+7. Do not claim complete legal compliance from one photo.
 
-8. Do not claim legal compliance based only on one photograph.
+8. Do not invent Singapore WSH requirements.
 
-9. Do not invent a WSH requirement.
+9. Prefer the supplied safety checks.
 
-10. Match the finding to the supplied safety check library
-    whenever possible.
+10. Maximum 8 findings.
 
-11. If no relevant safety check exists, use:
-    check_id = ""
+11. Avoid duplicate findings.
 
-12. Maximum 8 findings.
+12. Keep observations factual.
 
-13. Avoid duplicate findings.
+13. Confidence must be between 0 and 1.
 
-14. Keep observations factual and concise.
-
-15. Confidence must be between 0 and 1.
-
-16. If no meaningful safety issue can be determined,
-    return CHECK_REQUIRED rather than inventing a problem.
+14. If no meaningful safety condition can be determined,
+    use CHECK_REQUIRED rather than inventing a problem.
 
 EXAMPLES:
 
-If a worker is clearly wearing a safety helmet:
-- PPE may be PASS.
+A worker visibly wearing a hard hat:
+PPE may be PASS.
 
-However, do not conclude that all PPE requirements
-are satisfied.
+Do not conclude that all PPE requirements are satisfied.
 
-If a vehicle and pedestrian are visibly sharing an unsafe
-space:
-- Vehicular Safety may be FAIL.
+Visible oil/liquid on a working area:
+Housekeeping may be FAIL.
 
-If a guardrail is visible but its condition cannot be
-confirmed:
-- use CHECK_REQUIRED.
+A vehicle and pedestrian visibly sharing an unsafe route:
+Vehicular Safety may be FAIL.
 
-If there is visible oil or liquid on a walking/working area:
-- Housekeeping may be FAIL.
+A crane visible in the background:
+Do NOT automatically report a lifting failure.
 
-If a lifting operation is visible:
-- assess only what can actually be seen.
+A condition that needs physical verification:
+CHECK_REQUIRED.
 
-If a crane or lifting machine is present but there is
-no visible unsafe condition:
-- do not automatically report FAIL.
-
-WSH SAFETY CHECK LIBRARY:
+SAFETY CHECK LIBRARY:
 
 ${buildSafetyCheckText(checks)}
 
 RETURN ONLY JSON.
 
-The JSON must have this exact structure:
+The response MUST have exactly this general structure:
 
 {
   "scene_summary": "Brief description of the visible scene.",
@@ -652,9 +660,9 @@ The JSON must have this exact structure:
       "status": "PASS",
       "risk_level": "LOW",
       "confidence": 0.90,
-      "check_id": "matching check ID",
+      "check_id": "matching safety check ID",
       "source_title": "WSH source",
-      "source_url": "WSH source URL"
+      "source_url": "https://www.tal.sg/wshc"
     }
   ]
 }
@@ -671,28 +679,20 @@ LOW
 MEDIUM
 HIGH
 
-Do not use Markdown.
-Do not use code fences.
-Do not add text before the JSON.
-Do not add text after the JSON.
+Do not return Markdown.
+Do not return bullet points.
+Do not return explanations outside JSON.
 `;
+
+
 }
 
 
 /*
- * ============================================================
- * EXTRACT AI RESPONSE TEXT
- * ============================================================
- *
- * Cloudflare's current Llama Vision synchronous output
- * is normally:
- *
- * {
- *   "response": "..."
- * }
- *
- * ============================================================
- */
+============================================================
+EXTRACT AI RESPONSE
+============================================================
+*/
 
 function extractAIResponseText(
   result: unknown
@@ -701,7 +701,9 @@ function extractAIResponseText(
   if (
     typeof result === "string"
   ) {
+
     return result;
+
   }
 
 
@@ -709,118 +711,96 @@ function extractAIResponseText(
     !result ||
     typeof result !== "object"
   ) {
+
     return "";
+
   }
 
 
-  const object =
+  const obj =
     result as Record<
       string,
       unknown
     >;
 
 
-  /*
-   * Normal Workers AI response.
-   */
-
   if (
-    typeof object.response ===
+    typeof obj.response ===
     "string"
   ) {
 
-    return object.response;
+    return obj.response;
+
   }
 
 
-  /*
-   * Some runtimes may return result.
-   */
-
   if (
-    typeof object.result ===
+    typeof obj.result ===
     "string"
   ) {
 
-    return object.result;
+    return obj.result;
+
   }
 
 
-  /*
-   * Some wrappers use text.
-   */
-
   if (
-    typeof object.text ===
+    typeof obj.text ===
     "string"
   ) {
 
-    return object.text;
+    return obj.text;
+
   }
 
 
   return "";
+
 }
 
 
 /*
- * ============================================================
- * CLEAN AI JSON
- * ============================================================
- */
-
-function cleanAIText(
-  text: string
-): string {
-
-  let result =
-    text.trim();
-
-
-  /*
-   * Remove code fences.
-   */
-
-  result =
-    result.replace(
-      /^```json\s*/i,
-      ""
-    );
-
-  result =
-    result.replace(
-      /^```\s*/i,
-      ""
-    );
-
-  result =
-    result.replace(
-      /\s*```$/i,
-      ""
-    );
-
-
-  return result.trim();
-}
-
-
-/*
- * ============================================================
- * PARSE JSON FROM AI
- * ============================================================
- */
+============================================================
+PARSE AI JSON
+============================================================
+*/
 
 function parseAIJSON(
   text: string
 ): unknown {
 
-  const cleaned =
-    cleanAIText(text);
+  let cleaned =
+    text.trim();
 
 
   /*
-   * First try the whole response.
-   */
+  Remove markdown fences.
+  */
+
+  cleaned =
+    cleaned.replace(
+      /^```json\s*/i,
+      ""
+    );
+
+
+  cleaned =
+    cleaned.replace(
+      /^```\s*/i,
+      ""
+    );
+
+
+  cleaned =
+    cleaned.replace(
+      /\s*```$/i,
+      ""
+    );
+
+
+  /*
+  Try direct JSON.
+  */
 
   try {
 
@@ -834,11 +814,12 @@ function parseAIJSON(
 
 
   /*
-   * Find JSON object inside text.
-   */
+  Search for JSON object inside response.
+  */
 
   const first =
     cleaned.indexOf("{");
+
 
   const last =
     cleaned.lastIndexOf("}");
@@ -865,81 +846,80 @@ function parseAIJSON(
     } catch {
       // Continue.
     }
+
   }
 
 
   throw new Error(
     "Workers AI did not return valid JSON."
   );
+
 }
 
 
 /*
- * ============================================================
- * NORMALISE AI RESULT
- * ============================================================
- */
+============================================================
+NORMALISE AI RESULT
+============================================================
+*/
 
 function normalizeAIResult(
   value: unknown
 ): AIResult {
 
-  let object: any =
+  let obj: any =
     value;
 
 
-  /*
-   * If response itself is a JSON string.
-   */
-
   if (
-    typeof object ===
-    "string"
+    typeof obj === "string"
   ) {
 
-    object =
+    obj =
       parseAIJSON(
-        object
+        obj
       );
+
   }
 
 
   /*
-   * If result contains response.
-   */
+  Handle:
+  {
+    response: {...}
+  }
+  */
 
   if (
-    object &&
-    typeof object ===
-    "object" &&
-    typeof object.response ===
-    "string"
+    obj &&
+    typeof obj === "object" &&
+    obj.response &&
+    typeof obj.response === "object"
   ) {
 
-    object =
-      parseAIJSON(
-        object.response
-      );
+    obj =
+      obj.response;
+
   }
 
 
   if (
-    !object ||
-    typeof object !==
-      "object"
+    !obj ||
+    typeof obj !== "object"
   ) {
 
     throw new Error(
       "Invalid AI result."
     );
+
   }
 
 
   const rawFindings =
     Array.isArray(
-      object.findings
+      obj.findings
     )
-      ? object.findings
+      ? obj.findings
       : [];
 
 
@@ -948,7 +928,7 @@ function normalizeAIResult(
 
 
   for (
-    const rawFinding
+    const raw
     of rawFindings.slice(
       0,
       8
@@ -956,79 +936,75 @@ function normalizeAIResult(
   ) {
 
     if (
-      !rawFinding ||
-      typeof rawFinding !==
-        "object"
+      !raw ||
+      typeof raw !== "object"
     ) {
+
       continue;
+
     }
 
 
-    const raw =
-      rawFinding as Record<
+    const item =
+      raw as Record<
         string,
         unknown
       >;
-
-
-    const title =
-      cleanString(
-        raw.title,
-        "Safety observation"
-      );
-
-
-    const observation =
-      cleanString(
-        raw.observation,
-        "Physical/site verification required."
-      );
 
 
     findings.push({
 
       category:
         normalizeCategory(
-          raw.category
+          item.category
         ),
 
-      title,
+      title:
+        cleanString(
+          item.title,
+          "Safety observation"
+        ),
 
-      observation,
+      observation:
+        cleanString(
+          item.observation,
+          "Physical/site verification required."
+        ),
 
       status:
         normalizeStatus(
-          raw.status
+          item.status
         ),
 
       risk_level:
         normalizeRisk(
-          raw.risk_level
+          item.risk_level
         ),
 
       confidence:
         clampConfidence(
-          raw.confidence
+          item.confidence
         ),
 
       check_id:
         cleanString(
-          raw.check_id
+          item.check_id
         ),
 
       source_title:
         cleanString(
-          raw.source_title,
+          item.source_title,
           "WSH Council"
         ),
 
       source_url:
         cleanString(
-          raw.source_url,
+          item.source_url,
           WSH_DEFAULT_URL
         ),
 
     });
+
   }
 
 
@@ -1036,40 +1012,22 @@ function normalizeAIResult(
 
     scene_summary:
       cleanString(
-        object.scene_summary,
+        obj.scene_summary,
         "Workplace scene analysed."
       ),
 
     findings,
 
   };
+
 }
 
 
 /*
- * ============================================================
- * RUN VISION AI
- * ============================================================
- *
- * IMPORTANT:
- *
- * No response_format.
- * No JSON schema.
- *
- * We first make the basic Vision request work.
- *
- * Cloudflare documentation shows:
- *
- * const response = await env.AI.run(
- *   "@cf/meta/llama-3.2-11b-vision-instruct",
- *   {
- *     messages,
- *     image: imageBase64
- *   }
- * );
- *
- * ============================================================
- */
+============================================================
+RUN VISION AI
+============================================================
+*/
 
 async function runVisionAI(
   env: Env,
@@ -1077,34 +1035,52 @@ async function runVisionAI(
   prompt: string
 ): Promise<AIResult> {
 
-  const messages = [
-
-    {
-      role: "system",
-
-      content:
-        "You are a careful Singapore workplace safety inspection assistant. Return ONLY valid JSON.",
-
-    },
-
-    {
-      role: "user",
-
-      content:
-        prompt,
-
-    },
-
-  ];
-
-
   /*
-   * This is the documented Cloudflare Vision format.
-   */
+  JSON MODE.
+
+  This is the important change.
+
+  The previous AI response was:
+
+  "The image shows a worker..."
+
+  rather than JSON.
+
+  JSON Mode asks Cloudflare's model to return a JSON
+  object instead.
+  */
 
   const aiInput = {
 
-    messages,
+    messages: [
+
+      {
+
+        role: "system",
+
+        content:
+          `
+You are a workplace safety inspection AI.
+
+Return ONLY a valid JSON object.
+
+Never return Markdown.
+Never return bullet points.
+Never return explanatory text outside JSON.
+`,
+
+      },
+
+      {
+
+        role: "user",
+
+        content:
+          prompt,
+
+      },
+
+    ],
 
     image,
 
@@ -1117,15 +1093,24 @@ async function runVisionAI(
     top_p:
       0.9,
 
+    response_format: {
+
+      type:
+        "json_object",
+
+    },
+
   };
 
 
   console.log(
-    "Calling Workers AI Vision model..."
+    "Calling Workers AI:",
+    MODEL
   );
 
 
-  let response: unknown;
+  let response:
+    unknown;
 
 
   try {
@@ -1143,20 +1128,60 @@ async function runVisionAI(
         ? error.message
         : String(error);
 
+
     throw new Error(
       `Workers AI request failed: ${message}`
     );
+
   }
 
 
   console.log(
-    "Workers AI response received."
+    "Workers AI raw response received."
   );
 
 
   /*
-   * Get the actual generated text.
-   */
+  If JSON Mode returned an object.
+  */
+
+  if (
+    response &&
+    typeof response === "object"
+  ) {
+
+    const object =
+      response as any;
+
+
+    if (
+      object.response &&
+      typeof object.response === "object"
+    ) {
+
+      return normalizeAIResult(
+        object.response
+      );
+
+    }
+
+
+    if (
+      object.findings
+    ) {
+
+      return normalizeAIResult(
+        object
+      );
+
+    }
+
+  }
+
+
+  /*
+  Otherwise extract text.
+  */
 
   const text =
     extractAIResponseText(
@@ -1167,24 +1192,21 @@ async function runVisionAI(
   if (!text) {
 
     throw new Error(
-      "Workers AI returned no response text. Raw response: " +
-      JSON.stringify(response).substring(
-        0,
-        3000
-      )
+      "Workers AI returned no response."
     );
+
   }
 
 
   console.log(
-    "Workers AI response length:",
+    "AI response length:",
     text.length
   );
 
 
   /*
-   * Parse JSON.
-   */
+  Parse JSON.
+  */
 
   try {
 
@@ -1193,40 +1215,38 @@ async function runVisionAI(
         text
       );
 
+
     return normalizeAIResult(
       parsed
     );
 
-  } catch (error) {
+  } catch {
 
     /*
-     * Return the actual model response in the
-     * error. This is important for the next
-     * troubleshooting step if the model does
-     * not obey the JSON instruction.
-     */
+    IMPORTANT:
 
-    const detail =
-      error instanceof Error
-        ? error.message
-        : String(error);
-
+    Include the actual AI output so if Cloudflare
+    still returns normal text we can see it.
+    */
 
     throw new Error(
-      `${detail} Model response: ${text.substring(
+      "Workers AI did not return valid JSON. Model response: " +
+      text.substring(
         0,
         4000
-      )}`
+      )
     );
+
   }
+
 }
 
 
 /*
- * ============================================================
- * MATCH FINDING TO WSH CHECK
- * ============================================================
- */
+============================================================
+MATCH SAFETY CHECK
+============================================================
+*/
 
 function matchSafetyCheck(
   finding: Finding,
@@ -1234,8 +1254,8 @@ function matchSafetyCheck(
 ): SafetyCheck | null {
 
   /*
-   * 1. Exact ID.
-   */
+  Exact ID first.
+  */
 
   if (
     finding.check_id
@@ -1248,15 +1268,19 @@ function matchSafetyCheck(
           finding.check_id
       );
 
+
     if (exact) {
+
       return exact;
+
     }
+
   }
 
 
   /*
-   * 2. Category.
-   */
+  Category match.
+  */
 
   const category =
     finding.category
@@ -1275,13 +1299,15 @@ function matchSafetyCheck(
   if (
     categoryMatch
   ) {
+
     return categoryMatch;
+
   }
 
 
   /*
-   * 3. Keywords.
-   */
+  Keyword matching.
+  */
 
   const searchText =
     (
@@ -1296,6 +1322,7 @@ function matchSafetyCheck(
     SafetyCheck | null =
     null;
 
+
   let bestScore =
     0;
 
@@ -1307,14 +1334,13 @@ function matchSafetyCheck(
 
     const keywords =
       String(
-        check.keywords ||
-          ""
+        check.keywords || ""
       )
         .toLowerCase()
         .split(",")
         .map(
-          keyword =>
-            keyword.trim()
+          item =>
+            item.trim()
         )
         .filter(Boolean);
 
@@ -1335,7 +1361,9 @@ function matchSafetyCheck(
       ) {
 
         score++;
+
       }
+
     }
 
 
@@ -1349,19 +1377,22 @@ function matchSafetyCheck(
 
       best =
         check;
+
     }
+
   }
 
 
   return best;
+
 }
 
 
 /*
- * ============================================================
- * CALCULATE OVERALL RESULT
- * ============================================================
- */
+============================================================
+OVERALL RESULT
+============================================================
+*/
 
 function calculateOverall(
   findings: Finding[]
@@ -1369,37 +1400,40 @@ function calculateOverall(
 
   if (
     findings.some(
-      finding =>
-        finding.status ===
+      item =>
+        item.status ===
         "FAIL"
     )
   ) {
 
     return "ATTENTION";
+
   }
 
 
   if (
     findings.some(
-      finding =>
-        finding.status ===
+      item =>
+        item.status ===
         "CHECK_REQUIRED"
     )
   ) {
 
     return "CHECK_REQUIRED";
+
   }
 
 
   return "PASS";
+
 }
 
 
 /*
- * ============================================================
- * CREATE INSPECTION
- * ============================================================
- */
+============================================================
+CREATE INSPECTION
+============================================================
+*/
 
 async function createInspection(
   db: D1Database,
@@ -1447,11 +1481,14 @@ async function createInspection(
     );
 
 
-  if (!columns.length) {
+  if (
+    !columns.length
+  ) {
 
     throw new Error(
       "The inspections table could not be found."
     );
+
   }
 
 
@@ -1465,8 +1502,10 @@ async function createInspection(
   if (
     columns.includes("id")
   ) {
+
     values.id =
       id;
+
   }
 
 
@@ -1478,6 +1517,7 @@ async function createInspection(
 
     values.inspection_no =
       inspectionNo;
+
   }
 
 
@@ -1489,6 +1529,7 @@ async function createInspection(
 
     values.location =
       location;
+
   }
 
 
@@ -1500,6 +1541,7 @@ async function createInspection(
 
     values.inspector =
       inspector;
+
   }
 
 
@@ -1511,6 +1553,7 @@ async function createInspection(
 
     values.created_at =
       nowISO();
+
   }
 
 
@@ -1522,6 +1565,7 @@ async function createInspection(
 
     values.overall_result =
       "CHECK_REQUIRED";
+
   }
 
 
@@ -1537,6 +1581,7 @@ async function createInspection(
 
     values.status =
       "CHECK_REQUIRED";
+
   }
 
 
@@ -1546,11 +1591,14 @@ async function createInspection(
     );
 
 
-  if (!names.length) {
+  if (
+    !names.length
+  ) {
 
     throw new Error(
-      "No usable columns were found in inspections."
+      "No usable columns found in inspections."
     );
+
   }
 
 
@@ -1562,17 +1610,15 @@ async function createInspection(
       .join(", ");
 
 
-  const sql =
-    `
-    INSERT INTO inspections
-    (${names.join(", ")})
-    VALUES
-    (${placeholders})
-    `;
-
-
   await db
-    .prepare(sql)
+    .prepare(
+      `
+      INSERT INTO inspections
+      (${names.join(", ")})
+      VALUES
+      (${placeholders})
+      `
+    )
     .bind(
       ...names.map(
         name =>
@@ -1583,17 +1629,21 @@ async function createInspection(
 
 
   return {
+
     id,
+
     inspectionNo,
+
   };
+
 }
 
 
 /*
- * ============================================================
- * UPDATE INSPECTION
- * ============================================================
- */
+============================================================
+UPDATE INSPECTION
+============================================================
+*/
 
 async function updateInspection(
   db: D1Database,
@@ -1628,7 +1678,9 @@ async function updateInspection(
       )
       .run();
 
+
     return;
+
   }
 
 
@@ -1651,15 +1703,17 @@ async function updateInspection(
         inspectionId
       )
       .run();
+
   }
+
 }
 
 
 /*
- * ============================================================
- * SAVE PHOTO
- * ============================================================
- */
+============================================================
+SAVE PHOTO
+============================================================
+*/
 
 async function savePhoto(
   db: D1Database,
@@ -1679,11 +1733,14 @@ async function savePhoto(
     );
 
 
-  if (!columns.length) {
+  if (
+    !columns.length
+  ) {
 
     throw new Error(
       "The inspection_photos table could not be found."
     );
+
   }
 
 
@@ -1700,6 +1757,7 @@ async function savePhoto(
 
     values.id =
       photoId;
+
   }
 
 
@@ -1711,6 +1769,7 @@ async function savePhoto(
 
     values.inspection_id =
       inspectionId;
+
   }
 
 
@@ -1722,6 +1781,7 @@ async function savePhoto(
 
     values.file_name =
       fileName;
+
   }
 
 
@@ -1737,6 +1797,7 @@ async function savePhoto(
 
     values.filename =
       fileName;
+
   }
 
 
@@ -1748,6 +1809,7 @@ async function savePhoto(
 
     values.content_type =
       contentType;
+
   }
 
 
@@ -1763,6 +1825,7 @@ async function savePhoto(
 
     values.mime_type =
       contentType;
+
   }
 
 
@@ -1774,6 +1837,7 @@ async function savePhoto(
 
     values.object_key =
       `inspection/${inspectionId}/${photoId}`;
+
   }
 
 
@@ -1785,6 +1849,7 @@ async function savePhoto(
 
     values.created_at =
       nowISO();
+
   }
 
 
@@ -1794,11 +1859,14 @@ async function savePhoto(
     );
 
 
-  if (!names.length) {
+  if (
+    !names.length
+  ) {
 
     throw new Error(
-      "No usable columns were found in inspection_photos."
+      "No usable columns found in inspection_photos."
     );
+
   }
 
 
@@ -1829,34 +1897,32 @@ async function savePhoto(
 
 
   return photoId;
+
 }
 
 
 /*
- * ============================================================
- * SAVE INSPECTION ITEMS
- * ============================================================
- *
- * YOUR ACTUAL TABLE:
- *
- * inspection_items
- *
- * id
- * inspection_id
- * photo_id
- * category
- * title
- * observation
- * status
- * risk_level
- * confidence
- * check_id
- * source_title
- * source_url
- * created_at
- *
- * ============================================================
- */
+============================================================
+SAVE INSPECTION ITEMS
+
+YOUR CONFIRMED TABLE:
+
+id
+inspection_id
+photo_id
+category
+title
+observation
+status
+risk_level
+confidence
+check_id
+source_title
+source_url
+created_at
+
+============================================================
+*/
 
 async function saveInspectionItems(
   db: D1Database,
@@ -1878,32 +1944,8 @@ async function saveInspectionItems(
       );
 
 
-    const id =
+    const itemId =
       crypto.randomUUID();
-
-
-    const category =
-      matched?.category ||
-      finding.category ||
-      "Other";
-
-
-    const checkId =
-      matched?.id ||
-      finding.check_id ||
-      null;
-
-
-    const sourceTitle =
-      matched?.source_title ||
-      finding.source_title ||
-      "WSH Council";
-
-
-    const sourceUrl =
-      matched?.source_url ||
-      finding.source_url ||
-      WSH_DEFAULT_URL;
 
 
     await db
@@ -1932,30 +1974,53 @@ async function saveInspectionItems(
         `
       )
       .bind(
-        id,
+
+        itemId,
+
         inspectionId,
+
         photoId,
-        category,
+
+        matched?.category ||
+          finding.category,
+
         finding.title,
+
         finding.observation,
+
         finding.status,
+
         finding.risk_level,
+
         finding.confidence,
-        checkId,
-        sourceTitle,
-        sourceUrl,
+
+        matched?.id ||
+          finding.check_id ||
+          null,
+
+        matched?.source_title ||
+          finding.source_title ||
+          "WSH Council",
+
+        matched?.source_url ||
+          finding.source_url ||
+          WSH_DEFAULT_URL,
+
         nowISO()
+
       )
       .run();
+
   }
+
 }
 
 
 /*
- * ============================================================
- * ANALYSE PHOTO
- * ============================================================
- */
+============================================================
+ANALYSE PHOTO
+============================================================
+*/
 
 async function handleAnalyse(
   request: Request,
@@ -1967,10 +2032,8 @@ async function handleAnalyse(
 
 
   /*
-   * ----------------------------------------------------------
-   * JSON REQUEST
-   * ----------------------------------------------------------
-   */
+  Read request.
+  */
 
   try {
 
@@ -1988,14 +2051,13 @@ async function handleAnalyse(
       },
       400
     );
+
   }
 
 
   /*
-   * ----------------------------------------------------------
-   * VALIDATE IMAGE
-   * ----------------------------------------------------------
-   */
+  Image required.
+  */
 
   if (
     !body.image ||
@@ -2012,14 +2074,9 @@ async function handleAnalyse(
       },
       400
     );
+
   }
 
-
-  /*
-   * ----------------------------------------------------------
-   * FORM DATA
-   * ----------------------------------------------------------
-   */
 
   const location =
     cleanString(
@@ -2050,10 +2107,8 @@ async function handleAnalyse(
 
 
   /*
-   * ----------------------------------------------------------
-   * IMAGE
-   * ----------------------------------------------------------
-   */
+  Normalise image.
+  */
 
   let image: string;
 
@@ -2079,14 +2134,13 @@ async function handleAnalyse(
       },
       400
     );
+
   }
 
 
   /*
-   * ----------------------------------------------------------
-   * CHECK IMAGE SIZE
-   * ----------------------------------------------------------
-   */
+  Check request size.
+  */
 
   if (
     image.length >
@@ -2098,18 +2152,17 @@ async function handleAnalyse(
         success: false,
 
         error:
-          "Image is too large. Please select a smaller photo."
+          "Image is too large. Please use a smaller photo."
       },
       413
     );
+
   }
 
 
   /*
-   * ----------------------------------------------------------
-   * LOAD WSH CHECKS
-   * ----------------------------------------------------------
-   */
+  Load WSH checks.
+  */
 
   const checks =
     await loadSafetyChecks(
@@ -2118,10 +2171,8 @@ async function handleAnalyse(
 
 
   /*
-   * ----------------------------------------------------------
-   * CREATE INSPECTION
-   * ----------------------------------------------------------
-   */
+  Create inspection.
+  */
 
   let inspection:
     {
@@ -2155,14 +2206,13 @@ async function handleAnalyse(
       },
       500
     );
+
   }
 
 
   /*
-   * ----------------------------------------------------------
-   * SAVE PHOTO RECORD
-   * ----------------------------------------------------------
-   */
+  Save photo record.
+  */
 
   let photoId: string;
 
@@ -2178,12 +2228,6 @@ async function handleAnalyse(
       );
 
   } catch (error) {
-
-    console.error(
-      "PHOTO RECORD ERROR:",
-      error
-    );
-
 
     return jsonResponse(
       {
@@ -2202,14 +2246,13 @@ async function handleAnalyse(
       },
       500
     );
+
   }
 
 
   /*
-   * ----------------------------------------------------------
-   * PROMPT
-   * ----------------------------------------------------------
-   */
+  Build prompt.
+  */
 
   const prompt =
     buildAIPrompt(
@@ -2218,10 +2261,8 @@ async function handleAnalyse(
 
 
   /*
-   * ----------------------------------------------------------
-   * RUN VISION AI
-   * ----------------------------------------------------------
-   */
+  AI analysis.
+  */
 
   let aiResult:
     AIResult;
@@ -2250,11 +2291,17 @@ async function handleAnalyse(
     );
 
 
-    await updateInspection(
-      env.SAFETY_DB,
-      inspection.id,
-      "CHECK_REQUIRED"
-    );
+    try {
+
+      await updateInspection(
+        env.SAFETY_DB,
+        inspection.id,
+        "CHECK_REQUIRED"
+      );
+
+    } catch {
+      // Ignore update error.
+    }
 
 
     return jsonResponse(
@@ -2271,14 +2318,13 @@ async function handleAnalyse(
       },
       500
     );
+
   }
 
 
   /*
-   * ----------------------------------------------------------
-   * MATCH FINDINGS TO WSH CHECKS
-   * ----------------------------------------------------------
-   */
+  Match findings to safety checks.
+  */
 
   const findings =
     aiResult.findings.map(
@@ -2314,15 +2360,14 @@ async function handleAnalyse(
             WSH_DEFAULT_URL,
 
         };
+
       }
     );
 
 
   /*
-   * ----------------------------------------------------------
-   * OVERALL RESULT
-   * ----------------------------------------------------------
-   */
+  Calculate overall result.
+  */
 
   const overall =
     calculateOverall(
@@ -2331,10 +2376,8 @@ async function handleAnalyse(
 
 
   /*
-   * ----------------------------------------------------------
-   * SAVE INSPECTION ITEMS
-   * ----------------------------------------------------------
-   */
+  Save inspection items.
+  */
 
   try {
 
@@ -2355,7 +2398,7 @@ async function handleAnalyse(
 
 
     console.error(
-      "INSPECTION ITEMS ERROR:",
+      "SAVE ITEMS ERROR:",
       detail
     );
 
@@ -2365,7 +2408,7 @@ async function handleAnalyse(
         success: false,
 
         error:
-          "AI analysis completed but the result could not be saved.",
+          "AI analysis completed but findings could not be saved.",
 
         detail,
 
@@ -2373,22 +2416,24 @@ async function handleAnalyse(
           inspection.id,
 
         ai_result: {
+
           scene_summary:
             aiResult.scene_summary,
 
-          findings
-        }
+          findings,
+
+        },
+
       },
       500
     );
+
   }
 
 
   /*
-   * ----------------------------------------------------------
-   * UPDATE INSPECTION
-   * ----------------------------------------------------------
-   */
+  Update inspection.
+  */
 
   try {
 
@@ -2401,20 +2446,20 @@ async function handleAnalyse(
   } catch (error) {
 
     console.error(
-      "INSPECTION UPDATE ERROR:",
+      "UPDATE INSPECTION ERROR:",
       error
     );
+
   }
 
 
   /*
-   * ----------------------------------------------------------
-   * RETURN RESULT
-   * ----------------------------------------------------------
-   */
+  Return successful result.
+  */
 
   return jsonResponse(
     {
+
       success: true,
 
       inspection: {
@@ -2442,17 +2487,17 @@ async function handleAnalyse(
 
       findings,
 
-    },
-    200
+    }
   );
+
 }
 
 
 /*
- * ============================================================
- * RECENT INSPECTIONS
- * ============================================================
- */
+============================================================
+RECENT INSPECTIONS
+============================================================
+*/
 
 async function handleRecentInspections(
   db: D1Database
@@ -2499,15 +2544,17 @@ async function handleRecentInspections(
       },
       500
     );
+
   }
+
 }
 
 
 /*
- * ============================================================
- * SINGLE INSPECTION
- * ============================================================
- */
+============================================================
+SINGLE INSPECTION
+============================================================
+*/
 
 async function handleSingleInspection(
   db: D1Database,
@@ -2543,6 +2590,7 @@ async function handleSingleInspection(
         },
         404
       );
+
     }
 
 
@@ -2580,6 +2628,7 @@ async function handleSingleInspection(
 
     return jsonResponse(
       {
+
         success: true,
 
         inspection,
@@ -2591,6 +2640,7 @@ async function handleSingleInspection(
         photos:
           photos.results ||
           [],
+
       }
     );
 
@@ -2610,15 +2660,17 @@ async function handleSingleInspection(
       },
       500
     );
+
   }
+
 }
 
 
 /*
- * ============================================================
- * SAFETY CHECK API
- * ============================================================
- */
+============================================================
+SAFETY CHECKS API
+============================================================
+*/
 
 async function handleSafetyChecks(
   db: D1Database
@@ -2632,22 +2684,25 @@ async function handleSafetyChecks(
 
   return jsonResponse(
     {
+
       success: true,
 
       count:
         checks.length,
 
       checks,
+
     }
   );
+
 }
 
 
 /*
- * ============================================================
- * HEALTH
- * ============================================================
- */
+============================================================
+HEALTH
+============================================================
+*/
 
 async function handleHealth(
   db: D1Database
@@ -2668,6 +2723,7 @@ async function handleHealth(
       )
       .first();
 
+
     database =
       true;
 
@@ -2677,6 +2733,7 @@ async function handleHealth(
         db
       );
 
+
     safetyChecks =
       checks.length;
 
@@ -2684,11 +2741,13 @@ async function handleHealth(
 
     database =
       false;
+
   }
 
 
   return jsonResponse(
     {
+
       success: true,
 
       service:
@@ -2710,16 +2769,18 @@ async function handleHealth(
 
       timestamp:
         nowISO(),
+
     }
   );
+
 }
 
 
 /*
- * ============================================================
- * ROUTER
- * ============================================================
- */
+============================================================
+ROUTER
+============================================================
+*/
 
 async function route(
   request: Request,
@@ -2737,10 +2798,8 @@ async function route(
 
 
   /*
-   * ----------------------------------------------------------
-   * HEALTH
-   * ----------------------------------------------------------
-   */
+  HEALTH
+  */
 
   if (
     path ===
@@ -2752,63 +2811,22 @@ async function route(
     return handleHealth(
       env.SAFETY_DB
     );
+
   }
 
 
   /*
-   * ----------------------------------------------------------
-   * ANALYZE
-   * ----------------------------------------------------------
-   *
-   * American spelling.
-   * ----------------------------------------------------------
-   */
-
-  if (
-    path ===
-      "/api/analyze" &&
-    request.method ===
-      "POST"
-  ) {
-
-    return handleAnalyse(
-      request,
-      env
-    );
-  }
-
-
-  /*
-   * ----------------------------------------------------------
-   * ANALYSE
-   * ----------------------------------------------------------
-   *
-   * British spelling.
-   * ----------------------------------------------------------
-   */
-
-  if (
-    path ===
-      "/api/analyse" &&
-    request.method ===
-      "POST"
-  ) {
-
-    return handleAnalyse(
-      request,
-      env
-    );
-  }
-
-
-  /*
-   * ----------------------------------------------------------
-   * EXTRA COMPATIBILITY ROUTES
-   * ----------------------------------------------------------
-   */
+  ANALYSE / ANALYZE
+  */
 
   if (
     (
+      path ===
+        "/api/analyze" ||
+
+      path ===
+        "/api/analyse" ||
+
       path ===
         "/api/analyze-photo" ||
 
@@ -2823,14 +2841,13 @@ async function route(
       request,
       env
     );
+
   }
 
 
   /*
-   * ----------------------------------------------------------
-   * RECENT INSPECTIONS
-   * ----------------------------------------------------------
-   */
+  RECENT INSPECTIONS
+  */
 
   if (
     path ===
@@ -2842,14 +2859,13 @@ async function route(
     return handleRecentInspections(
       env.SAFETY_DB
     );
+
   }
 
 
   /*
-   * ----------------------------------------------------------
-   * SINGLE INSPECTION
-   * ----------------------------------------------------------
-   */
+  SINGLE INSPECTION
+  */
 
   if (
     path.startsWith(
@@ -2879,6 +2895,7 @@ async function route(
         },
         400
       );
+
     }
 
 
@@ -2886,14 +2903,13 @@ async function route(
       env.SAFETY_DB,
       id
     );
+
   }
 
 
   /*
-   * ----------------------------------------------------------
-   * SAFETY CHECKS
-   * ----------------------------------------------------------
-   */
+  SAFETY CHECKS
+  */
 
   if (
     path ===
@@ -2905,14 +2921,13 @@ async function route(
     return handleSafetyChecks(
       env.SAFETY_DB
     );
+
   }
 
 
   /*
-   * ----------------------------------------------------------
-   * ROOT
-   * ----------------------------------------------------------
-   */
+  ROOT
+  */
 
   if (
     path === "/" &&
@@ -2922,6 +2937,7 @@ async function route(
 
     return jsonResponse(
       {
+
         success: true,
 
         service:
@@ -2937,32 +2953,31 @@ async function route(
 
           "GET /api/health",
 
+          "GET /api/safety-checks",
+
+          "GET /api/inspections",
+
+          "GET /api/inspections/:id",
+
           "POST /api/analyze",
 
           "POST /api/analyse",
 
-          "GET /api/inspections",
-
-          "GET /api/safety-checks",
-
         ],
+
       }
     );
+
   }
 
 
   /*
-   * ----------------------------------------------------------
-   * NOT FOUND
-   * ----------------------------------------------------------
-   *
-   * Include path/method so we can immediately see
-   * what the frontend is requesting.
-   * ----------------------------------------------------------
-   */
+  NOT FOUND
+  */
 
   return jsonResponse(
     {
+
       success: false,
 
       error:
@@ -2977,6 +2992,12 @@ async function route(
 
         "GET /api/health",
 
+        "GET /api/safety-checks",
+
+        "GET /api/inspections",
+
+        "GET /api/inspections/:id",
+
         "POST /api/analyze",
 
         "POST /api/analyse",
@@ -2985,24 +3006,20 @@ async function route(
 
         "POST /api/analyse-photo",
 
-        "GET /api/inspections",
-
-        "GET /api/inspections/:id",
-
-        "GET /api/safety-checks",
-
       ],
+
     },
     404
   );
+
 }
 
 
 /*
- * ============================================================
- * WORKER ENTRY POINT
- * ============================================================
- */
+============================================================
+WORKER ENTRY
+============================================================
+*/
 
 export default {
 
@@ -3012,8 +3029,8 @@ export default {
   ): Promise<Response> {
 
     /*
-     * CORS preflight.
-     */
+    CORS preflight.
+    */
 
     if (
       request.method ===
@@ -3027,14 +3044,12 @@ export default {
 
           headers:
             corsHeaders(),
+
         }
       );
+
     }
 
-
-    /*
-     * Route request.
-     */
 
     try {
 
@@ -3059,16 +3074,20 @@ export default {
 
       return jsonResponse(
         {
+
           success: false,
 
           error:
             "Server error.",
 
           detail,
+
         },
         500
       );
+
     }
+
   },
 
 } satisfies ExportedHandler<Env>;
