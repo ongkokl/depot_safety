@@ -60,38 +60,129 @@ Rules:
 - confidence must be between 0 and 1.
 `;
 
-  const response: any = await env.AI.run(VISION_MODEL, {
-    messages: [
-      { role: "system", content: system },
-      {
-        role: "user",
-        content: "Analyse this workplace photo for safety inspection purposes."
-      }
-    ],
-    image: imageDataUrl,
-    temperature: 0.1,
-    max_tokens: 1400
-  });
+const response: any = await env.AI.run(VISION_MODEL, {
+  messages: [
+    {
+      role: "system",
+      content: `
+You are a workplace safety inspection assistant.
 
-  const raw = response?.response ?? response?.result ?? "";
-  const cleaned = String(raw).replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
+Analyse ONLY what is visibly supported by the photograph.
 
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    return {
-      scene_summary: "The AI returned an unstructured observation.",
-      categories: ["Other"],
-      observations: [{
-        category: "Other",
-        title: "AI analysis requires review",
-        observation: cleaned.slice(0, 1500),
-        risk_level: "MEDIUM",
-        confidence: 0.5,
-        status: "CHECK_REQUIRED"
-      }]
-    };
-  }
+Return a JSON object matching the supplied schema.
+
+Keep the response concise:
+- maximum 6 observations
+- observation maximum 200 characters
+- no explanations outside JSON
+
+Use CHECK_REQUIRED whenever the photograph is insufficient to determine compliance.
+
+Do not make legal conclusions.
+`
+    },
+    {
+      role: "user",
+      content: `
+Inspect this workplace photograph.
+
+Look specifically for:
+1. Vehicular Safety
+2. Housekeeping
+3. PPE
+4. Work at Height
+5. Lifting
+6. Other obvious physical hazards
+
+Identify only conditions that are visibly supported by the image.
+`
+    }
+  ],
+
+  image: imageDataUrl,
+
+  response_format: {
+    type: "json_schema",
+    json_schema: {
+      type: "object",
+      properties: {
+        scene_summary: {
+          type: "string"
+        },
+        observations: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              category: {
+                type: "string",
+                enum: [
+                  "Vehicular Safety",
+                  "Housekeeping",
+                  "PPE",
+                  "Work at Height",
+                  "Lifting",
+                  "Other"
+                ]
+              },
+              title: {
+                type: "string"
+              },
+              observation: {
+                type: "string"
+              },
+              risk_level: {
+                type: "string",
+                enum: ["HIGH", "MEDIUM", "LOW"]
+              },
+              confidence: {
+                type: "number"
+              },
+              status: {
+                type: "string",
+                enum: ["FAIL", "CHECK_REQUIRED", "PASS"]
+              }
+            },
+            required: [
+              "category",
+              "title",
+              "observation",
+              "risk_level",
+              "confidence",
+              "status"
+            ]
+          }
+        }
+      },
+      required: [
+        "scene_summary",
+        "observations"
+      ]
+    }
+  },
+
+  temperature: 0.1,
+  max_tokens: 1200
+});
+
+const raw = response?.response ?? response?.result ?? "";
+
+try {
+  return typeof raw === "string" ? JSON.parse(raw) : raw;
+} catch (error) {
+  console.error("AI JSON parsing failed:", raw);
+
+  return {
+    scene_summary: "AI response could not be converted into structured findings.",
+    observations: [{
+      category: "Other",
+      title: "AI analysis requires review",
+      observation: String(raw).slice(0, 500),
+      risk_level: "MEDIUM",
+      confidence: 0.5,
+      status: "CHECK_REQUIRED"
+    }]
+  };
 }
 
 async function findRelevantChecks(env: Env, observations: any[]) {
