@@ -2,14 +2,16 @@ interface Env {
   AI: Ai;
   SAFETY_DB: D1Database;
   PHOTOS: R2Bucket;
-
-  // Optional. Keep this binding out of wrangler.toml for now.
-  // VECTORIZE?: VectorizeIndex;
+  ASSETS: Fetcher;
 }
 
-const VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
+const VISION_MODEL =
+  "@cf/meta/llama-3.2-11b-vision-instruct";
 
-const json = (data: unknown, status = 200): Response => {
+const json = (
+  data: unknown,
+  status = 200
+): Response => {
   return Response.json(data, {
     status,
     headers: {
@@ -19,7 +21,7 @@ const json = (data: unknown, status = 200): Response => {
   });
 };
 
-function id(prefix: string): string {
+function makeId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID()}`;
 }
 
@@ -27,38 +29,498 @@ function now(): string {
   return new Date().toISOString();
 }
 
-/**
- * Analyse a workplace image using Cloudflare Workers AI Vision.
- *
- * The model is instructed to return structured JSON using Cloudflare
- * Workers AI JSON Mode.
- */
+
+/* =========================================================
+   CATEGORY CORRECTION
+   ========================================================= */
+
+function correctCategory(
+  category: string,
+  title: string,
+  observation: string
+): string {
+
+  const text = `
+    ${category}
+    ${title}
+    ${observation}
+  `.toLowerCase();
+
+  /*
+   * PPE takes priority when the observation
+   * is clearly about PPE.
+   */
+
+  if (
+    /\bhelmet\b/.test(text) ||
+    /\bhard hat\b/.test(text) ||
+    /\bsafety vest\b/.test(text) ||
+    /\bhi-vis\b/.test(text) ||
+    /\bhigh visibility\b/.test(text) ||
+    /\bhigh-visibility\b/.test(text) ||
+    /\bgloves\b/.test(text) ||
+    /\bsafety shoes\b/.test(text) ||
+    /\bprotective equipment\b/.test(text) ||
+    /\bppe\b/.test(text)
+  ) {
+    return "PPE";
+  }
+
+
+  /*
+   * Work at Height.
+   */
+
+  if (
+    /\bguardrail\b/.test(text) ||
+    /\bhandrail\b/.test(text) ||
+    /\bfall\b/.test(text) ||
+    /\bedge protection\b/.test(text) ||
+    /\bopen edge\b/.test(text) ||
+    /\bopening\b/.test(text) ||
+    /\bplatform\b/.test(text) ||
+    /\bscaffold\b/.test(text) ||
+    /\bladder\b/.test(text) ||
+    /\belevated\b/.test(text) ||
+    /\bheight\b/.test(text)
+  ) {
+    return "Work at Height";
+  }
+
+
+  /*
+   * Lifting.
+   */
+
+  if (
+    /\bcrane\b/.test(text) ||
+    /\bsuspended load\b/.test(text) ||
+    /\blifting\b/.test(text) ||
+    /\bsling\b/.test(text) ||
+    /\bhook\b/.test(text) ||
+    /\blift\b/.test(text) ||
+    /\bcontainer handling\b/.test(text)
+  ) {
+    return "Lifting";
+  }
+
+
+  /*
+   * Vehicular safety.
+   */
+
+  if (
+    /\btruck\b/.test(text) ||
+    /\bprime mover\b/.test(text) ||
+    /\bforklift\b/.test(text) ||
+    /\bvehicle\b/.test(text) ||
+    /\bpedestrian\b/.test(text) ||
+    /\btraffic\b/.test(text) ||
+    /\bdriveway\b/.test(text) ||
+    /\broad\b/.test(text)
+  ) {
+    return "Vehicular Safety";
+  }
+
+
+  /*
+   * Housekeeping.
+   */
+
+  if (
+    /\bspill\b/.test(text) ||
+    /\boil\b/.test(text) ||
+    /\bwet floor\b/.test(text) ||
+    /\bslippery\b/.test(text) ||
+    /\bdebris\b/.test(text) ||
+    /\bclutter\b/.test(text) ||
+    /\bobstruction\b/.test(text) ||
+    /\bhousekeeping\b/.test(text)
+  ) {
+    return "Housekeeping";
+  }
+
+
+  return [
+    "Vehicular Safety",
+    "Housekeeping",
+    "PPE",
+    "Work at Height",
+    "Lifting"
+  ].includes(category)
+    ? category
+    : "Other";
+}
+
+
+/* =========================================================
+   SAFETY STATUS NORMALISATION
+   ========================================================= */
+
+function normaliseStatus(
+  item: any
+): string {
+
+  const status =
+    String(
+      item?.status || ""
+    ).toUpperCase();
+
+  const observation =
+    String(
+      item?.observation || ""
+    ).toLowerCase();
+
+  const title =
+    String(
+      item?.title || ""
+    ).toLowerCase();
+
+  const combined =
+    `${title} ${observation}`;
+
+
+  /*
+   * A visible or suspected hazard should
+   * never be reported as PASS.
+   */
+
+  const hazardWords = [
+    "hazard",
+    "risk",
+    "spill",
+    "unsafe",
+    "exposed",
+    "fall",
+    "suspended load",
+    "obstruction",
+    "blocked",
+    "missing",
+    "inadequate",
+    "potential"
+  ];
+
+  const containsHazard =
+    hazardWords.some(
+      word =>
+        combined.includes(word)
+    );
+
+
+  if (
+    containsHazard &&
+    status === "PASS"
+  ) {
+    return "CHECK_REQUIRED";
+  }
+
+
+  /*
+   * Statements about absence are uncertain
+   * unless the photograph clearly establishes
+   * the absence.
+   *
+   * We deliberately use CHECK_REQUIRED here.
+   */
+
+  const absenceClaim =
+    /\bno visible\b/.test(combined) ||
+    /\bnot visible\b/.test(combined) ||
+    /\bcannot see\b/.test(combined) ||
+    /\bnot wearing\b/.test(combined) ||
+    /\bmissing\b/.test(combined);
+
+  if (
+    absenceClaim &&
+    status === "FAIL"
+  ) {
+    return "CHECK_REQUIRED";
+  }
+
+
+  if (
+    status === "FAIL" ||
+    status === "CHECK_REQUIRED" ||
+    status === "PASS"
+  ) {
+    return status;
+  }
+
+
+  return "CHECK_REQUIRED";
+}
+
+
+/* =========================================================
+   RISK NORMALISATION
+   ========================================================= */
+
+function normaliseRisk(
+  item: any,
+  status: string
+): string {
+
+  let risk =
+    String(
+      item?.risk_level || ""
+    ).toUpperCase();
+
+
+  if (
+    ![
+      "HIGH",
+      "MEDIUM",
+      "LOW"
+    ].includes(risk)
+  ) {
+    risk = "MEDIUM";
+  }
+
+
+  /*
+   * Don't allow PASS + HIGH risk.
+   */
+
+  if (
+    status === "PASS" &&
+    risk === "HIGH"
+  ) {
+    risk = "LOW";
+  }
+
+
+  return risk;
+}
+
+
+/* =========================================================
+   VISION AI
+   ========================================================= */
+
 async function analyzeImage(
   env: Env,
   imageDataUrl: string
 ): Promise<any> {
 
   const prompt = `
-You are a workplace safety inspection AI for Singapore.
+You are a workplace safety inspection AI
+for Singapore container terminals, depots,
+warehouses and industrial workplaces.
 
-Analyse the workplace photograph.
+Analyse the supplied workplace photograph.
 
-Return ONLY a valid JSON object.
-Do NOT use Markdown.
-Do NOT use code fences.
-Do NOT add any text before or after the JSON.
+IMPORTANT:
 
-The JSON must have exactly this structure:
+You must separate:
+
+1. WHAT IS CLEARLY VISIBLE
+2. WHAT MAY BE A SAFETY CONCERN
+3. WHAT CANNOT BE DETERMINED FROM THE PHOTO
+
+DO NOT make assumptions.
+
+DO NOT invent hazards.
+
+DO NOT infer that something is absent simply
+because it is partly hidden, outside the frame,
+blocked or difficult to see.
+
+For example:
+
+If a safety vest is visible, do NOT say
+"no visible safety vest".
+
+If a guardrail is visible, do NOT say
+"no visible guardrail".
+
+If a crane is visible but the worker's relationship
+to the lifting operation cannot be established,
+use CHECK_REQUIRED.
+
+If a possible spill is not clearly visible,
+do NOT report a spill.
+
+If compliance cannot be established from a photograph,
+use CHECK_REQUIRED.
+
+The purpose of this system is to ASSIST a safety
+inspector, not to make a final legal or compliance
+decision.
+
+==================================================
+FIRST: VISUAL INVENTORY
+==================================================
+
+Look carefully for:
+
+PEOPLE
+- number of visible workers
+- position of workers
+- posture
+- activity
+
+PPE
+- hard hat
+- safety helmet
+- high visibility vest
+- safety clothing
+- gloves
+- safety footwear
+- other visible PPE
+
+WORK AT HEIGHT
+- elevated platforms
+- edges
+- openings
+- guardrails
+- handrails
+- ladders
+- scaffolds
+- fall exposure
+
+LIFTING
+- cranes
+- lifting equipment
+- hooks
+- slings
+- suspended loads
+- container handling
+
+VEHICLES
+- trucks
+- prime movers
+- forklifts
+- mobile equipment
+- pedestrians
+- traffic interaction
+
+HOUSEKEEPING
+- spills
+- oil
+- water
+- debris
+- clutter
+- obstructions
+
+==================================================
+SECOND: SAFETY ASSESSMENT
+==================================================
+
+Only create an observation when:
+
+A. Something potentially unsafe is visibly present,
+
+OR
+
+B. A safety condition needs physical/site verification.
+
+Do not create findings simply because a category
+exists.
+
+For every observation, state the visible evidence.
+
+==================================================
+VERY IMPORTANT PPE RULE
+==================================================
+
+If a helmet, safety vest or other PPE is visible,
+state that it is visible.
+
+Do not call it missing.
+
+The photograph alone may not establish whether
+the PPE is appropriate for the task.
+
+Therefore:
+
+Visible PPE
+=
+PASS or CHECK_REQUIRED
+
+Not visible PPE
+=
+CHECK_REQUIRED
+
+Do NOT automatically use FAIL.
+
+==================================================
+VERY IMPORTANT GUARDRAIL RULE
+==================================================
+
+If a guardrail is visible:
+
+Do NOT report "no visible guardrail".
+
+Instead say something like:
+
+"Guardrail is visible around the work area.
+Verify that it is complete, secure and suitable
+for fall prevention."
+
+Use CHECK_REQUIRED if compliance cannot be
+established from the image.
+
+==================================================
+VERY IMPORTANT SPILL RULE
+==================================================
+
+Only report a spill if liquid, oil or another
+spilled substance is clearly visible.
+
+Do not interpret shadows, stains, reflections,
+dust or ordinary surface colour as a spill.
+
+==================================================
+VERY IMPORTANT LIFTING RULE
+==================================================
+
+If a crane or lifting equipment is visible:
+
+Do not assume a lifting operation is currently
+affecting the worker.
+
+Use CHECK_REQUIRED if the relationship cannot
+be determined.
+
+==================================================
+STATUS RULES
+==================================================
+
+PASS:
+The visible condition appears acceptable,
+but this does not confirm legal compliance.
+
+CHECK_REQUIRED:
+The photo indicates something that requires
+physical/site verification.
+
+FAIL:
+Use only when a clearly visible unsafe condition
+is strongly supported by the photograph.
+
+When uncertain, use CHECK_REQUIRED.
+
+==================================================
+OUTPUT
+==================================================
+
+Return ONLY valid JSON.
+
+No Markdown.
+No code fences.
+No explanation outside JSON.
+
+Use exactly this structure:
 
 {
-  "scene_summary": "short description",
+  "scene_summary": "short factual description",
   "observations": [
     {
-      "category": "Vehicular Safety",
-      "title": "short finding title",
-      "observation": "what can actually be seen",
-      "risk_level": "HIGH",
-      "confidence": 0.90,
+      "category": "PPE",
+      "title": "short title",
+      "observation": "visible evidence and what needs checking",
+      "risk_level": "LOW",
+      "confidence": 0.85,
       "status": "CHECK_REQUIRED"
     }
   ]
@@ -66,100 +528,82 @@ The JSON must have exactly this structure:
 
 Allowed category values:
 
-- Vehicular Safety
-- Housekeeping
-- PPE
-- Work at Height
-- Lifting
-- Other
+Vehicular Safety
+Housekeeping
+PPE
+Work at Height
+Lifting
+Other
 
 Allowed risk levels:
 
-- HIGH
-- MEDIUM
-- LOW
+HIGH
+MEDIUM
+LOW
 
-Allowed status values:
+Allowed status:
 
-- PASS
-- FAIL
-- CHECK_REQUIRED
+PASS
+CHECK_REQUIRED
+FAIL
 
-IMPORTANT SAFETY RULES:
+Maximum 6 observations.
 
-1. Only report things that are actually visible in the photograph.
-2. Do not invent hazards.
-3. Do not make a legal compliance determination.
-4. A photograph may not provide enough information to determine compliance.
-5. Use CHECK_REQUIRED when physical/site verification is needed.
-6. PASS means the visible condition appears acceptable only.
-7. FAIL means a potentially unsafe visible condition is present.
-8. Do not assume PPE is compliant simply because a helmet or vest is visible.
-9. If a crane or lifting equipment is visible but the worker's exposure to the lifting operation cannot be determined, use CHECK_REQUIRED.
-10. If a worker is near an edge, opening, platform or guardrail, consider Work at Height and edge protection.
-11. Maximum 6 observations.
-12. Keep each observation below 250 characters.
-13. confidence must be a number between 0 and 1.
+Each observation must be concise.
 
-For this photograph, specifically inspect:
+Do not create an observation for every category.
 
-- Workers
-- PPE
-- Guardrails
-- Open edges
-- Fall hazards
-- Work at height
-- Lifting equipment
-- Suspended loads
-- Vehicles
-- Pedestrian interaction
-- Housekeeping
-- Obstructions
-- Spills
-- Other obvious physical hazards
+Only report categories supported by the photograph.
 `;
+
 
   try {
 
-    const response: any = await env.AI.run(
-      VISION_MODEL,
-      {
-        prompt,
-        image: imageDataUrl,
+    const response: any =
+      await env.AI.run(
+        VISION_MODEL,
+        {
+          prompt,
+          image: imageDataUrl,
 
-        response_format: {
-          type: "json_object"
-        },
+          response_format: {
+            type: "json_object"
+          },
 
-        temperature: 0.1,
-        max_tokens: 1200
-      }
-    );
+          temperature: 0.05,
+
+          max_tokens: 1200
+        }
+      );
+
 
     console.log(
-      "Workers AI raw response:",
+      "Workers AI response:",
       JSON.stringify(response)
     );
+
 
     const raw =
       response?.response ??
       response?.result ??
       "";
 
+
     if (!raw) {
+
       throw new Error(
         "Workers AI returned an empty response."
       );
+
     }
+
 
     let parsed: any;
 
-    /*
-     * Workers AI normally returns JSON text.
-     * Handle both JSON text and an already parsed object.
-     */
 
-    if (typeof raw === "object") {
+    if (
+      typeof raw === "object"
+    ) {
 
       parsed = raw;
 
@@ -168,52 +612,70 @@ For this photograph, specifically inspect:
       let text =
         String(raw).trim();
 
+
       /*
-       * Defensive cleanup if the model
-       * still returns Markdown fences.
+       * Defensive Markdown cleanup.
        */
 
-      text = text
-        .replace(/^```json\s*/i, "")
-        .replace(/^```\s*/i, "")
-        .replace(/```\s*$/i, "")
-        .trim();
+      text =
+        text
+          .replace(
+            /^```json\s*/i,
+            ""
+          )
+          .replace(
+            /^```\s*/i,
+            ""
+          )
+          .replace(
+            /```\s*$/i,
+            ""
+          )
+          .trim();
+
 
       parsed =
         JSON.parse(text);
+
     }
 
-    /*
-     * Validate top-level response.
-     */
 
     if (
       !parsed ||
       typeof parsed !== "object"
     ) {
+
       throw new Error(
-        "AI returned an invalid JSON object."
+        "AI returned invalid JSON."
       );
+
     }
+
 
     if (
       typeof parsed.scene_summary !==
       "string"
     ) {
+
       parsed.scene_summary =
         "Workplace scene analysed.";
+
     }
+
 
     if (
       !Array.isArray(
         parsed.observations
       )
     ) {
+
       parsed.observations = [];
+
     }
 
+
     /*
-     * Limit to six findings.
+     * Maximum six observations.
      */
 
     parsed.observations =
@@ -222,60 +684,80 @@ For this photograph, specifically inspect:
         .map(
           (item: any) => {
 
-            const categories = [
-              "Vehicular Safety",
-              "Housekeeping",
-              "PPE",
-              "Work at Height",
-              "Lifting",
-              "Other"
-            ];
+            let title =
+              String(
+                item?.title ||
+                "Safety observation"
+              ).trim();
 
-            const risks = [
-              "HIGH",
-              "MEDIUM",
-              "LOW"
-            ];
 
-            const statuses = [
-              "PASS",
-              "FAIL",
-              "CHECK_REQUIRED"
-            ];
+            let observation =
+              String(
+                item?.observation ||
+                "Further inspection required."
+              ).trim();
+
+
+            /*
+             * Correct category.
+             */
 
             const category =
-              categories.includes(
-                item?.category
-              )
-                ? item.category
-                : "Other";
+              correctCategory(
+                String(
+                  item?.category ||
+                  "Other"
+                ),
+                title,
+                observation
+              );
 
-            const risk =
-              risks.includes(
-                item?.risk_level
-              )
-                ? item.risk_level
-                : "MEDIUM";
+
+            /*
+             * Correct status.
+             */
 
             const status =
-              statuses.includes(
-                item?.status
-              )
-                ? item.status
-                : "CHECK_REQUIRED";
+              normaliseStatus(
+                {
+                  ...item,
+                  title,
+                  observation
+                }
+              );
+
+
+            /*
+             * Correct risk.
+             */
+
+            const risk =
+              normaliseRisk(
+                item,
+                status
+              );
+
+
+            /*
+             * Confidence.
+             */
 
             let confidence =
               Number(
                 item?.confidence
               );
 
+
             if (
               Number.isNaN(
                 confidence
               )
             ) {
+
               confidence = 0.5;
+
             }
+
 
             confidence =
               Math.max(
@@ -286,21 +768,67 @@ For this photograph, specifically inspect:
                 )
               );
 
+
+            /*
+             * Special correction for
+             * obvious absence statements.
+             */
+
+            const lower =
+              `${title} ${observation}`
+                .toLowerCase();
+
+
+            if (
+              (
+                lower.includes(
+                  "no visible safety vest"
+                ) ||
+                lower.includes(
+                  "no visible vest"
+                )
+              )
+            ) {
+
+              title =
+                "PPE requires verification";
+
+              observation =
+                "The photograph does not provide sufficient evidence to confirm whether all task-required PPE is provided and worn. Verify PPE requirements on site.";
+
+            }
+
+
+            if (
+              lower.includes(
+                "no visible guardrail"
+              )
+            ) {
+
+              title =
+                "Edge protection requires verification";
+
+              observation =
+                "Verify that suitable guardrails or other fall-prevention measures are provided and properly secured at the work area.";
+
+            }
+
+
             return {
 
               category,
 
               title:
-                String(
-                  item?.title ||
-                  "Safety observation"
-                ).slice(0, 200),
+                title.slice(
+                  0,
+                  200
+                ),
 
               observation:
-                String(
-                  item?.observation ||
-                  "Further inspection required."
-                ).slice(0, 500),
+                observation.slice(
+                  0,
+                  500
+                ),
 
               risk_level:
                 risk,
@@ -310,17 +838,55 @@ For this photograph, specifically inspect:
               status
 
             };
+
           }
         );
 
+
+    /*
+     * Remove duplicate observations.
+     */
+
+    const seen =
+      new Set<string>();
+
+
+    parsed.observations =
+      parsed.observations.filter(
+        (item: any) => {
+
+          const key =
+            `${item.category}|${item.title}`
+              .toLowerCase();
+
+
+          if (
+            seen.has(key)
+          ) {
+            return false;
+          }
+
+
+          seen.add(key);
+
+          return true;
+
+        }
+      );
+
+
     return parsed;
 
-  } catch (error: any) {
+
+  } catch (
+    error: any
+  ) {
 
     console.error(
-      "Workers AI analysis error:",
+      "Workers AI analysis failed:",
       error
     );
+
 
     throw new Error(
       `AI analysis failed: ${
@@ -328,34 +894,36 @@ For this photograph, specifically inspect:
         String(error)
       }`
     );
+
   }
+
 }
 
-/**
- * Find relevant WSH checks from D1.
- *
- * Vectorize is intentionally not required for the current MVP.
- * We will add semantic WSH matching after the Vision AI pipeline
- * is stable.
- */
+
+/* =========================================================
+   FIND WSH CHECKS
+   ========================================================= */
+
 async function findRelevantChecks(
   env: Env,
   observations: any[]
 ): Promise<any[]> {
 
-  const categories = [
-    ...new Set(
-      observations
-        .map(
-          (observation) =>
-            String(
-              observation?.category ||
-              ""
-            )
-        )
-        .filter(Boolean)
-    )
-  ];
+  const categories =
+    [
+      ...new Set(
+        observations
+          .map(
+            item =>
+              String(
+                item?.category ||
+                ""
+              )
+          )
+          .filter(Boolean)
+      )
+    ];
+
 
   if (
     categories.length === 0
@@ -365,10 +933,12 @@ async function findRelevantChecks(
 
   }
 
+
   const placeholders =
     categories
       .map(() => "?")
       .join(",");
+
 
   const result =
     await env.SAFETY_DB
@@ -386,28 +956,31 @@ async function findRelevantChecks(
       )
       .all();
 
+
   return result.results || [];
 
 }
 
 
-/**
- * Match AI observations to the current D1 safety checks.
- */
+/* =========================================================
+   MATCH WSH CHECK
+   ========================================================= */
+
 function enrichFindings(
   observations: any[],
   checks: any[]
 ): any[] {
 
   return observations.map(
-    (observation) => {
+    observation => {
 
       const candidates =
         checks.filter(
-          (check) =>
+          check =>
             check.category ===
             observation.category
         );
+
 
       const searchText =
         `
@@ -416,13 +989,18 @@ function enrichFindings(
         `
           .toLowerCase();
 
+
       let selectedCheck:
         any = null;
 
+
       /*
-       * First attempt:
-       * keyword matching.
+       * Keyword matching.
        */
+
+      let bestScore =
+        0;
+
 
       for (
         const check of candidates
@@ -430,7 +1008,8 @@ function enrichFindings(
 
         const keywords =
           String(
-            check.keywords || ""
+            check.keywords ||
+            ""
           )
             .split(",")
             .map(
@@ -441,29 +1020,46 @@ function enrichFindings(
             )
             .filter(Boolean);
 
-        const matched =
-          keywords.some(
-            (keyword) =>
-              searchText.includes(
-                keyword
-              )
-          );
 
-        if (matched) {
+        let score =
+          0;
+
+
+        for (
+          const keyword of keywords
+        ) {
+
+          if (
+            searchText.includes(
+              keyword
+            )
+          ) {
+
+            score++;
+
+          }
+
+        }
+
+
+        if (
+          score > bestScore
+        ) {
+
+          bestScore =
+            score;
 
           selectedCheck =
             check;
-
-          break;
 
         }
 
       }
 
+
       /*
-       * If no keyword matched,
-       * use the first relevant
-       * category check.
+       * If nothing matched by keyword,
+       * use the first check in that category.
        */
 
       if (
@@ -475,6 +1071,7 @@ function enrichFindings(
           candidates[0];
 
       }
+
 
       return {
 
@@ -508,9 +1105,10 @@ function enrichFindings(
 }
 
 
-/**
- * Main Worker.
- */
+/* =========================================================
+   MAIN WORKER
+   ========================================================= */
+
 export default {
 
   async fetch(
@@ -519,11 +1117,12 @@ export default {
   ): Promise<Response> {
 
     /*
-     * CORS preflight.
+     * CORS.
      */
 
     if (
-      request.method === "OPTIONS"
+      request.method ===
+      "OPTIONS"
     ) {
 
       return new Response(
@@ -531,7 +1130,8 @@ export default {
         {
           status: 204,
           headers: {
-            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Origin":
+              "*",
             "Access-Control-Allow-Headers":
               "Content-Type, Authorization",
             "Access-Control-Allow-Methods":
@@ -542,42 +1142,53 @@ export default {
 
     }
 
+
     const url =
-      new URL(request.url);
+      new URL(
+        request.url
+      );
+
 
     try {
 
-      /*
-       * Health check.
-       */
+      /* =========================================
+         HEALTH
+         ========================================= */
 
       if (
         url.pathname ===
           "/api/health" &&
-        request.method === "GET"
+        request.method ===
+          "GET"
       ) {
 
         return json({
+
           ok: true,
+
           service:
             "safety-inspection-ai",
+
           ai_model:
             VISION_MODEL,
+
           vectorize:
             false
+
         });
 
       }
 
 
-      /*
-       * Return current WSH checks.
-       */
+      /* =========================================
+         SAFETY CHECKS
+         ========================================= */
 
       if (
         url.pathname ===
           "/api/checks" &&
-        request.method === "GET"
+        request.method ===
+          "GET"
       ) {
 
         const result =
@@ -592,22 +1203,27 @@ export default {
             )
             .all();
 
+
         return json({
+
           checks:
-            result.results || []
+            result.results ||
+            []
+
         });
 
       }
 
 
-      /*
-       * Return recent inspections.
-       */
+      /* =========================================
+         RECENT INSPECTIONS
+         ========================================= */
 
       if (
         url.pathname ===
           "/api/inspections" &&
-        request.method === "GET"
+        request.method ===
+          "GET"
       ) {
 
         const result =
@@ -619,7 +1235,8 @@ export default {
                 COUNT(f.id) AS finding_count
               FROM inspections i
               LEFT JOIN findings f
-                ON f.inspection_id = i.id
+                ON f.inspection_id =
+                   i.id
               GROUP BY i.id
               ORDER BY i.created_at DESC
               LIMIT 100
@@ -627,44 +1244,59 @@ export default {
             )
             .all();
 
+
         return json({
+
           inspections:
-            result.results || []
+            result.results ||
+            []
+
         });
 
       }
 
 
-      /*
-       * Analyse a new safety inspection photo.
-       */
+      /* =========================================
+         ANALYSE PHOTO
+         ========================================= */
+
       if (
         url.pathname ===
           "/api/analyze" &&
-        request.method === "POST"
+        request.method ===
+          "POST"
       ) {
 
         const form =
           await request.formData();
 
+
         const file =
-          form.get("photo");
+          form.get(
+            "photo"
+          );
+
 
         const location =
           String(
-            form.get("location") ||
+            form.get(
+              "location"
+            ) ||
             "Unspecified"
           );
 
+
         const inspector =
           String(
-            form.get("inspector") ||
+            form.get(
+              "inspector"
+            ) ||
             "Inspector"
           );
 
 
         /*
-         * Validate uploaded file.
+         * Validate photo.
          */
 
         if (
@@ -720,24 +1352,35 @@ export default {
          */
 
         const inspectionId =
-          id("insp");
+          makeId(
+            "insp"
+          );
+
 
         const inspectionNo =
           `SI-${new Date()
             .toISOString()
-            .slice(0, 10)
-            .replaceAll("-", "")}-${crypto
+            .slice(
+              0,
+              10
+            )
+            .replaceAll(
+              "-",
+              ""
+            )}-${crypto
             .randomUUID()
-            .slice(0, 6)
+            .slice(
+              0,
+              6
+            )
             .toUpperCase()}`;
 
+
         const photoId =
-          id("photo");
+          makeId(
+            "photo"
+          );
 
-
-        /*
-         * Sanitise original filename.
-         */
 
         const safeFileName =
           file.name.replace(
@@ -749,11 +1392,14 @@ export default {
         const objectKey =
           `${new Date()
             .toISOString()
-            .slice(0, 10)}/${inspectionId}/${photoId}-${safeFileName}`;
+            .slice(
+              0,
+              10
+            )}/${inspectionId}/${photoId}-${safeFileName}`;
 
 
         /*
-         * Save photo to R2.
+         * Store image in R2.
          */
 
         await env.PHOTOS.put(
@@ -769,7 +1415,7 @@ export default {
 
 
         /*
-         * Create inspection record.
+         * Store inspection.
          */
 
         await env.SAFETY_DB
@@ -799,7 +1445,7 @@ export default {
 
 
         /*
-         * Create photo record.
+         * Store photo record.
          */
 
         await env.SAFETY_DB
@@ -829,7 +1475,7 @@ export default {
 
 
         /*
-         * Convert image to a data URL for Workers AI.
+         * Convert image to data URL.
          */
 
         const bytes =
@@ -837,10 +1483,14 @@ export default {
             await file.arrayBuffer()
           );
 
-        let binary = "";
+
+        let binary =
+          "";
+
 
         const chunkSize =
           0x8000;
+
 
         for (
           let i = 0;
@@ -858,17 +1508,19 @@ export default {
 
         }
 
+
         const imageDataUrl =
           `data:${file.type};base64,${btoa(
             binary
           )}`;
 
 
-        /*
-         * Run Vision AI.
-         */
+        /* =========================================
+           AI ANALYSIS
+           ========================================= */
 
         let aiResult: any;
+
 
         try {
 
@@ -887,16 +1539,10 @@ export default {
             aiError
           );
 
-          /*
-           * The inspection/photo have already
-           * been saved successfully.
-           *
-           * Return the actual AI error to the
-           * browser so debugging is easier.
-           */
 
           return json(
             {
+
               error:
                 "AI analysis failed.",
 
@@ -909,6 +1555,7 @@ export default {
 
               inspection_no:
                 inspectionNo
+
             },
             500
           );
@@ -916,9 +1563,9 @@ export default {
         }
 
 
-        /*
-         * Get relevant WSH checks.
-         */
+        /* =========================================
+           WSH MATCHING
+           ========================================= */
 
         const checks =
           await findRelevantChecks(
@@ -928,11 +1575,6 @@ export default {
           );
 
 
-        /*
-         * Match AI observations
-         * with WSH checks.
-         */
-
         const findings =
           enrichFindings(
             aiResult.observations ||
@@ -941,17 +1583,17 @@ export default {
           );
 
 
-        /*
-         * Determine overall result.
-         */
+        /* =========================================
+           OVERALL RESULT
+           ========================================= */
 
         let overall =
-          "CHECK_REQUIRED";
+          "PASS";
 
 
         const hasHighFail =
           findings.some(
-            (finding) =>
+            finding =>
               finding.status ===
                 "FAIL" &&
               finding.risk_level ===
@@ -961,32 +1603,30 @@ export default {
 
         const hasFail =
           findings.some(
-            (finding) =>
+            finding =>
               finding.status ===
               "FAIL"
           );
 
 
-        const hasCheckRequired =
+        const hasCheck =
           findings.some(
-            (finding) =>
+            finding =>
               finding.status ===
               "CHECK_REQUIRED"
           );
 
 
-        if (hasHighFail) {
-
-          overall =
-            "ATTENTION";
-
-        } else if (hasFail) {
+        if (
+          hasHighFail ||
+          hasFail
+        ) {
 
           overall =
             "ATTENTION";
 
         } else if (
-          hasCheckRequired
+          hasCheck
         ) {
 
           overall =
@@ -1001,7 +1641,7 @@ export default {
 
 
         /*
-         * Update inspection result.
+         * Update inspection.
          */
 
         await env.SAFETY_DB
@@ -1019,9 +1659,9 @@ export default {
           .run();
 
 
-        /*
-         * Save individual findings.
-         */
+        /* =========================================
+           SAVE FINDINGS
+           ========================================= */
 
         for (
           const finding of findings
@@ -1051,7 +1691,9 @@ export default {
             )
             .bind(
 
-              id("find"),
+              makeId(
+                "find"
+              ),
 
               inspectionId,
 
@@ -1074,14 +1716,17 @@ export default {
 
               Number(
                 finding.confidence ||
-                  0.5
+                0.5
               ),
 
-              finding.check_id,
+              finding.check_id ||
+                null,
 
-              finding.source_title,
+              finding.source_title ||
+                null,
 
-              finding.source_url,
+              finding.source_url ||
+                null,
 
               now()
 
@@ -1091,9 +1736,9 @@ export default {
         }
 
 
-        /*
-         * Return complete result to frontend.
-         */
+        /* =========================================
+           RESPONSE
+           ========================================= */
 
         return json({
 
@@ -1121,15 +1766,16 @@ export default {
       }
 
 
-      /*
-       * Get a single inspection.
-       */
+      /* =========================================
+         SINGLE INSPECTION
+         ========================================= */
 
       if (
         url.pathname.startsWith(
           "/api/inspections/"
         ) &&
-        request.method === "GET"
+        request.method ===
+          "GET"
       ) {
 
         const inspectionId =
@@ -1204,7 +1850,8 @@ export default {
           inspection,
 
           findings:
-            result.results || []
+            result.results ||
+            []
 
         });
 
@@ -1212,13 +1859,13 @@ export default {
 
 
       /*
-       * Everything else is served
-       * from the static assets directory.
+       * Static website.
        */
 
       return env.ASSETS.fetch(
         request
       );
+
 
     } catch (
       error: any
@@ -1229,20 +1876,17 @@ export default {
         error
       );
 
-      /*
-       * Return the real error.
-       * This is especially useful during
-       * the MVP testing phase.
-       */
 
       return json(
         {
+
           error:
             "Server error",
 
           detail:
             error?.message ||
             String(error)
+
         },
         500
       );
