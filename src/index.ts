@@ -3,19 +3,21 @@
  * SAFETY INSPECTION AI
  * Cloudflare Worker
  *
- * D1 TABLES USED:
- *
- * inspections
- * inspection_photos
- * findings
- * safety_checks
- * corrective_actions
- *
  * Workers AI:
  * @cf/meta/llama-3.2-11b-vision-instruct
  *
+ * D1:
+ *   inspections
+ *   inspection_photos
+ *   findings
+ *   safety_checks
+ *   corrective_actions
+ *
+ * R2:
+ *   PHOTOS
+ *
  * Vectorize:
- * NOT USED
+ *   NOT USED
  * ============================================================
  */
 
@@ -47,15 +49,6 @@ interface SafetyCheck {
   active: number;
 }
 
-interface AIFinding {
-  category: string;
-  title: string;
-  observation: string;
-  status: string;
-  risk_level: string;
-  confidence: number;
-}
-
 interface ParsedFinding {
   category: string;
   title: string;
@@ -74,6 +67,81 @@ interface ParsedFinding {
 
 /*
  * ============================================================
+ * JSON RESPONSE SCHEMA
+ * ============================================================
+ */
+
+const AI_RESPONSE_SCHEMA = {
+
+  type: "object",
+
+  properties: {
+
+    summary: {
+      type: "string"
+    },
+
+    findings: {
+
+      type: "array",
+
+      items: {
+
+        type: "object",
+
+        properties: {
+
+          category: {
+            type: "string"
+          },
+
+          title: {
+            type: "string"
+          },
+
+          observation: {
+            type: "string"
+          },
+
+          status: {
+            type: "string"
+          },
+
+          risk_level: {
+            type: "string"
+          },
+
+          confidence: {
+            type: "number"
+          }
+
+        },
+
+        required: [
+          "category",
+          "title",
+          "observation",
+          "status",
+          "risk_level",
+          "confidence"
+        ]
+
+      }
+
+    }
+
+  },
+
+  required: [
+    "summary",
+    "findings"
+  ]
+
+};
+
+
+/*
+ * ============================================================
  * RESPONSE HELPERS
  * ============================================================
  */
@@ -87,6 +155,7 @@ function json(
     JSON.stringify(data),
     {
       status,
+
       headers: {
         "Content-Type":
           "application/json; charset=utf-8",
@@ -145,7 +214,7 @@ function inspectionNumber(): string {
 
 /*
  * ============================================================
- * NORMALISE CATEGORY
+ * CATEGORY NORMALISATION
  * ============================================================
  */
 
@@ -235,7 +304,7 @@ function normaliseCategory(
 
 /*
  * ============================================================
- * NORMALISE STATUS
+ * STATUS NORMALISATION
  * ============================================================
  */
 
@@ -266,7 +335,7 @@ function normaliseStatus(
 
 /*
  * ============================================================
- * NORMALISE RISK
+ * RISK NORMALISATION
  * ============================================================
  */
 
@@ -296,7 +365,7 @@ function normaliseRisk(
 
 /*
  * ============================================================
- * NORMALISE CONFIDENCE
+ * CONFIDENCE NORMALISATION
  * ============================================================
  */
 
@@ -316,7 +385,7 @@ function normaliseConfidence(
 
 
   /*
-   * Model may return 95 instead of 0.95.
+   * AI sometimes returns 95 instead of 0.95.
    */
 
   if (n > 1) {
@@ -336,7 +405,7 @@ function normaliseConfidence(
 
 /*
  * ============================================================
- * IMAGE -> DATA URL
+ * FILE -> DATA URL
  * ============================================================
  */
 
@@ -386,102 +455,7 @@ async function fileToDataUrl(
 
 /*
  * ============================================================
- * AI JSON SCHEMA
- * ============================================================
- */
-
-const AI_RESPONSE_SCHEMA = {
-
-  type: "object",
-
-  properties: {
-
-    summary: {
-      type: "string"
-    },
-
-    findings: {
-
-      type: "array",
-
-      items: {
-
-        type: "object",
-
-        properties: {
-
-          category: {
-            type: "string",
-            enum: [
-              "PPE",
-              "Work at Height",
-              "Lifting",
-              "Vehicular Safety",
-              "Housekeeping",
-              "Other"
-            ]
-          },
-
-          title: {
-            type: "string"
-          },
-
-          observation: {
-            type: "string"
-          },
-
-          status: {
-            type: "string",
-            enum: [
-              "PASS",
-              "CHECK_REQUIRED",
-              "FAIL"
-            ]
-          },
-
-          risk_level: {
-            type: "string",
-            enum: [
-              "LOW",
-              "MEDIUM",
-              "HIGH"
-            ]
-          },
-
-          confidence: {
-            type: "number",
-            minimum: 0,
-            maximum: 1
-          }
-
-        },
-
-        required: [
-          "category",
-          "title",
-          "observation",
-          "status",
-          "risk_level",
-          "confidence"
-        ]
-
-      }
-
-    }
-
-  },
-
-  required: [
-    "summary",
-    "findings"
-  ]
-
-};
-
-
-/*
- * ============================================================
- * AI PROMPT
+ * SAFETY AI PROMPT
  * ============================================================
  */
 
@@ -496,7 +470,7 @@ Analyse ONLY what can reasonably be seen in the photograph.
 This is an assistance tool.
 Do not make a final legal, regulatory or compliance decision.
 
-IMPORTANT SAFETY RULES:
+IMPORTANT:
 
 1. Do not invent hazards.
 
@@ -512,11 +486,11 @@ IMPORTANT SAFETY RULES:
 
 6. Maximum 6 findings.
 
-7. Do not report every visible object as a safety issue.
+7. Do not report every visible object.
 
-8. Focus on conditions relevant to workplace safety inspection.
+8. Focus on workplace safety.
 
-SAFETY AREAS:
+SAFETY CATEGORIES:
 
 PPE:
 - hard hat
@@ -561,71 +535,160 @@ HOUSEKEEPING:
 - blocked access
 - obstructions
 
-IMPORTANT VISUAL REASONING:
+VISUAL REASONING:
 
-A visible hard hat is evidence of PPE compliance.
-A visible safety vest is evidence of PPE compliance.
+A visible hard hat is evidence that a hard hat is being worn.
+
+A visible safety vest or high-visibility clothing is evidence
+of visible PPE.
 
 If a guardrail is clearly visible, DO NOT say
 "no guardrail".
 
-If a guardrail is visible but its completeness or condition
-cannot be confirmed, use CHECK_REQUIRED.
+If a guardrail is visible but its completeness, strength or
+condition cannot be confirmed, use CHECK_REQUIRED.
 
-A crane visible in the background does NOT automatically
-mean the worker is exposed to a lifting hazard.
+A crane visible in the background does NOT automatically mean
+the worker is exposed to a lifting hazard.
 
-If lifting equipment is visible but no suspended load or
-worker exposure can be confirmed, use CHECK_REQUIRED rather
-than FAIL.
+If lifting equipment is visible but no suspended load or worker
+exposure can be confirmed, use CHECK_REQUIRED.
 
 Only report a spill if a spill is actually visible.
 
 Only report a fall hazard when there is reasonable visual
 evidence.
 
-Do not confuse shadows, reflections or stains with hazards.
+Do not confuse shadows, reflections, stains or image artifacts
+with hazards.
 
 For uncertain conditions use CHECK_REQUIRED.
 
-CONFIDENCE:
+PPE EXAMPLE:
 
-Return confidence between 0 and 1.
+If worker clearly wears hard hat and high-visibility clothing:
 
-PASS examples:
+category = PPE
+status = PASS
+risk_level = LOW
 
-Hard hat clearly visible:
-PASS / LOW / high confidence.
+WORK AT HEIGHT EXAMPLE:
 
-Safety vest clearly visible:
-PASS / LOW / high confidence.
+If guardrail is visible but its condition cannot be verified:
 
-FAIL examples:
+category = Work at Height
+status = CHECK_REQUIRED
+risk_level = MEDIUM
 
-Worker clearly standing under a suspended load:
-FAIL / HIGH.
+LIFTING EXAMPLE:
 
-Clearly missing required guardrail at an exposed edge:
-FAIL / HIGH.
+If crane/lifting equipment is visible but worker exposure to
+suspended loads cannot be confirmed:
 
-CHECK_REQUIRED examples:
+category = Lifting
+status = CHECK_REQUIRED
+risk_level = MEDIUM
 
-Guardrail visible but condition cannot be fully confirmed.
+FAIL should only be used when the unsafe condition is clearly
+visible.
 
-Crane or lifting equipment visible but worker exposure
-cannot be confirmed.
+Return JSON with:
 
-PPE requirement cannot be confirmed from the photograph.
+{
+  "summary": "...",
+  "findings": [
+    {
+      "category": "...",
+      "title": "...",
+      "observation": "...",
+      "status": "PASS | CHECK_REQUIRED | FAIL",
+      "risk_level": "LOW | MEDIUM | HIGH",
+      "confidence": 0.0
+    }
+  ]
+}
 
-Return ONLY the structured JSON response requested by
-the system schema.
+Return ONLY JSON.
 `;
 }
 
 
 /*
  * ============================================================
- * EXTRACT AI RESULT
+ * FALLBACK JSON PROMPT
+ * ============================================================
+ */
+
+function buildFallbackPrompt(): string {
+
+  return `
+Analyse the workplace safety photograph.
+
+Return ONLY valid JSON.
+
+Do not use Markdown.
+Do not use ```.
+
+Use exactly this structure:
+
+{
+  "summary": "short scene summary",
+  "findings": [
+    {
+      "category": "PPE",
+      "title": "short finding title",
+      "observation": "what is visibly observed",
+      "status": "PASS",
+      "risk_level": "LOW",
+      "confidence": 0.95
+    }
+  ]
+}
+
+Allowed categories:
+
+PPE
+Work at Height
+Lifting
+Vehicular Safety
+Housekeeping
+Other
+
+Allowed status:
+
+PASS
+CHECK_REQUIRED
+FAIL
+
+Allowed risk_level:
+
+LOW
+MEDIUM
+HIGH
+
+Rules:
+
+- Do not invent hazards.
+- Use CHECK_REQUIRED if something cannot be confirmed.
+- Use FAIL only for a clearly visible unsafe condition.
+- A visible guardrail must not be described as missing.
+- A visible crane does not automatically mean lifting exposure.
+- A visible hard hat is evidence of PPE being worn.
+- A visible high-visibility vest is evidence of PPE being worn.
+- Maximum 6 findings.
+`;
+}
+
+
+/*
+ * ============================================================
+ * ROBUST AI RESPONSE PARSER
+ *
+ * Workers AI currently returns the generated text in
+ * result.response for this model.
+ *
+ * This function also handles nested objects, JSON strings,
+ * Markdown JSON and extra text surrounding JSON.
  * ============================================================
  */
 
@@ -633,63 +696,269 @@ function extractAIResponse(
   result: any
 ): any {
 
-  /*
-   * Workers AI JSON Mode normally returns:
-   *
-   * {
-   *   response: {...}
-   * }
-   *
-   * But handle several possible response forms.
-   */
-
-  if (
-    result &&
-    typeof result.response === "object"
-  ) {
-    return result.response;
-  }
+  console.log(
+    "RAW WORKERS AI RESPONSE:",
+    JSON.stringify(result)
+  );
 
 
-  if (
-    result &&
-    typeof result.result === "object"
-  ) {
-    return result.result;
-  }
+  function findStructuredObject(
+    value: any,
+    depth = 0
+  ): any {
 
-
-  if (
-    typeof result?.response === "string"
-  ) {
-
-    try {
-      return JSON.parse(
-        result.response
-      );
-    } catch {
+    if (
+      depth > 8 ||
+      value === null ||
+      value === undefined
+    ) {
       return null;
     }
 
-  }
+
+    /*
+     * Already structured.
+     */
+
+    if (
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      Array.isArray(value.findings)
+    ) {
+
+      return value;
+    }
 
 
-  if (
-    typeof result?.result === "string"
-  ) {
+    /*
+     * String response.
+     */
 
-    try {
-      return JSON.parse(
-        result.result
-      );
-    } catch {
+    if (
+      typeof value === "string"
+    ) {
+
+      let cleaned =
+        value.trim();
+
+
+      /*
+       * Remove common Markdown fences.
+       */
+
+      cleaned =
+        cleaned
+          .replace(
+            /^```json\s*/i,
+            ""
+          )
+          .replace(
+            /^```\s*/i,
+            ""
+          )
+          .replace(
+            /\s*```$/i,
+            ""
+          )
+          .trim();
+
+
+      /*
+       * Try entire string.
+       */
+
+      try {
+
+        const parsed =
+          JSON.parse(
+            cleaned
+          );
+
+
+        const found =
+          findStructuredObject(
+            parsed,
+            depth + 1
+          );
+
+
+        if (found) {
+          return found;
+        }
+
+      } catch {
+        /*
+         * Continue.
+         */
+      }
+
+
+      /*
+       * Look for JSON object inside text.
+       */
+
+      const firstBrace =
+        cleaned.indexOf("{");
+
+      const lastBrace =
+        cleaned.lastIndexOf("}");
+
+
+      if (
+        firstBrace >= 0 &&
+        lastBrace > firstBrace
+      ) {
+
+        const possibleJson =
+          cleaned.slice(
+            firstBrace,
+            lastBrace + 1
+          );
+
+
+        try {
+
+          const parsed =
+            JSON.parse(
+              possibleJson
+            );
+
+
+          const found =
+            findStructuredObject(
+              parsed,
+              depth + 1
+            );
+
+
+          if (found) {
+            return found;
+          }
+
+        } catch {
+          /*
+           * Continue.
+           */
+        }
+      }
+
+
       return null;
     }
 
+
+    /*
+     * Array.
+     */
+
+    if (
+      Array.isArray(value)
+    ) {
+
+      for (
+        const item of value
+      ) {
+
+        const found =
+          findStructuredObject(
+            item,
+            depth + 1
+          );
+
+
+        if (found) {
+          return found;
+        }
+      }
+
+
+      return null;
+    }
+
+
+    /*
+     * Object.
+     */
+
+    if (
+      typeof value === "object"
+    ) {
+
+      /*
+       * Search common Workers AI response fields first.
+       */
+
+      const preferredKeys = [
+        "response",
+        "result",
+        "output",
+        "content",
+        "text",
+        "data"
+      ];
+
+
+      for (
+        const key of preferredKeys
+      ) {
+
+        if (
+          Object.prototype.hasOwnProperty.call(
+            value,
+            key
+          )
+        ) {
+
+          const found =
+            findStructuredObject(
+              value[key],
+              depth + 1
+            );
+
+
+          if (found) {
+            return found;
+          }
+        }
+      }
+
+
+      /*
+       * Search everything else.
+       */
+
+      for (
+        const key of Object.keys(value)
+      ) {
+
+        if (
+          preferredKeys.includes(key)
+        ) {
+          continue;
+        }
+
+
+        const found =
+          findStructuredObject(
+            value[key],
+            depth + 1
+          );
+
+
+        if (found) {
+          return found;
+        }
+      }
+    }
+
+
+    return null;
   }
 
 
-  return null;
+  return findStructuredObject(
+    result
+  );
 }
 
 
@@ -754,7 +1023,7 @@ function normaliseAIFindings(
       );
 
 
-    let category =
+    const category =
       normaliseCategory(
         item.category ||
         "",
@@ -763,13 +1032,13 @@ function normaliseAIFindings(
       );
 
 
-    const status =
+    let status =
       normaliseStatus(
         item.status
       );
 
 
-    const risk =
+    let risk =
       normaliseRisk(
         item.risk_level
       );
@@ -781,145 +1050,197 @@ function normaliseAIFindings(
       );
 
 
-    /*
-     * Additional safety corrections.
-     */
-
     const combined =
       `${title} ${observation}`
         .toLowerCase();
 
 
     /*
-     * If the AI says the vest is visible,
-     * it must not become a missing-vest finding.
+     * --------------------------------------------------------
+     * PPE SAFETY CORRECTION
+     * --------------------------------------------------------
      */
+
+    const ppeVisible =
+      combined.includes(
+        "hard hat"
+      ) &&
+      (
+        combined.includes(
+          "wear"
+        ) ||
+        combined.includes(
+          "visible"
+        )
+      );
+
+
+    const vestVisible =
+      combined.includes(
+        "safety vest"
+      ) &&
+      (
+        combined.includes(
+          "wear"
+        ) ||
+        combined.includes(
+          "visible"
+        )
+      );
+
 
     if (
       category === "PPE" &&
       (
-        combined.includes(
-          "safety vest visible"
-        ) ||
-        combined.includes(
-          "vest visible"
-        ) ||
+        ppeVisible ||
+        vestVisible ||
         combined.includes(
           "high visibility clothing"
         ) ||
         combined.includes(
           "high-visibility clothing"
-        ) ||
-        combined.includes(
-          "wearing a hard hat"
         )
       )
     ) {
 
+      /*
+       * Don't allow the AI to call visibly worn PPE a FAIL.
+       */
+
       if (
-        status !== "FAIL"
+        !combined.includes(
+          "missing"
+        ) &&
+        !combined.includes(
+          "not wearing"
+        ) &&
+        !combined.includes(
+          "without"
+        )
       ) {
 
-        findings.push({
+        status =
+          "PASS";
 
-          category,
-
-          title,
-
-          observation,
-
-          status:
-            "PASS",
-
-          risk_level:
-            "LOW",
-
-          confidence
-
-        });
-
-        continue;
+        risk =
+          "LOW";
       }
     }
 
 
     /*
-     * If a guardrail is visibly present,
-     * don't allow "no guardrail" type logic.
+     * --------------------------------------------------------
+     * GUARDRAIL SAFETY CORRECTION
+     * --------------------------------------------------------
      */
-
-    let correctedStatus =
-      status;
-
 
     if (
       category === "Work at Height" &&
       combined.includes(
         "guardrail"
-      ) &&
-      (
-        combined.includes(
-          "visible"
-        ) ||
-        combined.includes(
-          "present"
-        )
-      ) &&
-      !combined.includes(
-        "missing"
-      ) &&
-      !combined.includes(
-        "no guardrail"
       )
     ) {
 
-      if (
-        status === "FAIL" &&
+      const guardrailVisible =
         combined.includes(
-          "verify"
+          "guardrail is visible"
+        ) ||
+        combined.includes(
+          "guardrail visible"
+        ) ||
+        combined.includes(
+          "guardrail is present"
+        ) ||
+        combined.includes(
+          "guardrail present"
+        );
+
+
+      if (
+        guardrailVisible &&
+        !combined.includes(
+          "missing"
+        ) &&
+        !combined.includes(
+          "no guardrail"
         )
       ) {
 
-        correctedStatus =
-          "CHECK_REQUIRED";
+        /*
+         * If the model says verify,
+         * CHECK_REQUIRED is appropriate.
+         */
+
+        if (
+          combined.includes(
+            "verify"
+          ) ||
+          combined.includes(
+            "condition"
+          ) ||
+          combined.includes(
+            "secure"
+          ) ||
+          combined.includes(
+            "complete"
+          )
+        ) {
+
+          status =
+            "CHECK_REQUIRED";
+
+          risk =
+            "MEDIUM";
+        }
       }
     }
 
 
     /*
-     * Lifting:
-     *
-     * Equipment visible alone should normally
-     * be CHECK_REQUIRED rather than FAIL.
+     * --------------------------------------------------------
+     * LIFTING SAFETY CORRECTION
+     * --------------------------------------------------------
      */
 
     if (
-      category === "Lifting" &&
-      (
-        combined.includes(
-          "equipment is visible"
-        ) ||
-        combined.includes(
-          "crane is visible"
-        ) ||
-        combined.includes(
-          "lifting equipment is visible"
-        )
-      ) &&
-      !combined.includes(
-        "suspended load"
-      ) &&
-      !combined.includes(
-        "worker is under"
-      )
+      category === "Lifting"
     ) {
 
+      const equipmentOnly =
+        (
+          combined.includes(
+            "crane is visible"
+          ) ||
+          combined.includes(
+            "crane visible"
+          ) ||
+          combined.includes(
+            "lifting equipment is visible"
+          ) ||
+          combined.includes(
+            "lifting equipment visible"
+          )
+        ) &&
+        !combined.includes(
+          "suspended load"
+        ) &&
+        !combined.includes(
+          "under a suspended load"
+        ) &&
+        !combined.includes(
+          "worker is under"
+        );
+
+
       if (
-        correctedStatus === "FAIL"
+        equipmentOnly
       ) {
 
-        correctedStatus =
+        status =
           "CHECK_REQUIRED";
+
+        risk =
+          "MEDIUM";
       }
     }
 
@@ -932,8 +1253,7 @@ function normaliseAIFindings(
 
       observation,
 
-      status:
-        correctedStatus,
+      status,
 
       risk_level:
         risk,
@@ -952,7 +1272,7 @@ function normaliseAIFindings(
 
 
   /*
-   * If AI returned nothing, create a review item.
+   * No findings.
    */
 
   if (
@@ -980,7 +1300,6 @@ function normaliseAIFindings(
         0.5
 
     });
-
   }
 
 
@@ -993,7 +1312,7 @@ function normaliseAIFindings(
 
 /*
  * ============================================================
- * LOAD SAFETY CHECKS
+ * LOAD WSH SAFETY CHECKS
  * ============================================================
  */
 
@@ -1028,7 +1347,7 @@ async function loadSafetyChecks(
 
 /*
  * ============================================================
- * MATCH SAFETY CHECK
+ * MATCH WSH SAFETY CHECK
  * ============================================================
  */
 
@@ -1048,10 +1367,6 @@ function matchSafetyCheck(
     finding.category
       .toLowerCase();
 
-
-  /*
-   * First restrict to the same category.
-   */
 
   const categoryMatches =
     checks.filter(
@@ -1076,6 +1391,7 @@ function matchSafetyCheck(
   let best:
     SafetyCheck | null =
       null;
+
 
   let bestScore =
     -1;
@@ -1103,10 +1419,6 @@ function matchSafetyCheck(
       0;
 
 
-    /*
-     * Category match.
-     */
-
     if (
       check.category
         .toLowerCase()
@@ -1116,10 +1428,6 @@ function matchSafetyCheck(
       score += 10;
     }
 
-
-    /*
-     * Keyword match.
-     */
 
     for (
       const keyword of keywords
@@ -1136,10 +1444,6 @@ function matchSafetyCheck(
       }
     }
 
-
-    /*
-     * Check question terms.
-     */
 
     const questionWords =
       check.check_question
@@ -1183,7 +1487,7 @@ function matchSafetyCheck(
 
 /*
  * ============================================================
- * ATTACH WSH CHECK
+ * ATTACH WSH INFORMATION
  * ============================================================
  */
 
@@ -1237,7 +1541,7 @@ function attachSafetyChecks(
 
 /*
  * ============================================================
- * CALCULATE OVERALL RESULT
+ * OVERALL RESULT
  * ============================================================
  */
 
@@ -1289,11 +1593,14 @@ async function saveInspection(
   const inspectionId =
     newId();
 
+
   const inspectionNo =
     inspectionNumber();
 
+
   const photoId =
     newId();
+
 
   const createdAt =
     new Date()
@@ -1302,7 +1609,7 @@ async function saveInspection(
 
   /*
    * ----------------------------------------------------------
-   * INSPECTIONS
+   * inspections
    * ----------------------------------------------------------
    */
 
@@ -1333,7 +1640,7 @@ async function saveInspection(
 
   /*
    * ----------------------------------------------------------
-   * R2 PHOTO
+   * R2
    * ----------------------------------------------------------
    */
 
@@ -1368,7 +1675,7 @@ async function saveInspection(
 
   /*
    * ----------------------------------------------------------
-   * INSPECTION PHOTO
+   * inspection_photos
    * ----------------------------------------------------------
    */
 
@@ -1399,7 +1706,7 @@ async function saveInspection(
 
   /*
    * ----------------------------------------------------------
-   * FINDINGS
+   * findings
    * ----------------------------------------------------------
    */
 
@@ -1454,11 +1761,10 @@ async function saveInspection(
 
     /*
      * --------------------------------------------------------
-     * CORRECTIVE ACTION
+     * corrective_actions
      *
-     * Only create automatically for FAIL.
-     *
-     * CHECK_REQUIRED requires inspector verification first.
+     * Automatically create action only for FAIL.
+     * CHECK_REQUIRED is first verified by inspector.
      * --------------------------------------------------------
      */
 
@@ -1484,12 +1790,19 @@ async function saveInspection(
         )
         .bind(
           newId(),
+
           findingId,
+
           `Correct the unsafe condition identified: ${finding.title}. ${finding.observation}`,
+
           null,
+
           null,
+
           "OPEN",
+
           createdAt,
+
           null
         )
         .run();
@@ -1498,10 +1811,198 @@ async function saveInspection(
 
 
   return {
+
     inspectionId,
+
     inspectionNo,
+
     photoId
+
   };
+}
+
+
+/*
+ * ============================================================
+ * RUN AI
+ * ============================================================
+ */
+
+async function runSafetyAI(
+  env: Env,
+  image: string
+): Promise<any> {
+
+  /*
+   * ----------------------------------------------------------
+   * FIRST ATTEMPT
+   *
+   * JSON Schema
+   * ----------------------------------------------------------
+   */
+
+  try {
+
+    const result =
+      await env.AI.run(
+        MODEL,
+        {
+          messages: [
+
+            {
+              role: "system",
+
+              content:
+                "You are a careful Singapore workplace safety inspection assistant. Analyse only visible evidence."
+            },
+
+            {
+              role: "user",
+
+              content:
+                buildPrompt()
+            }
+
+          ],
+
+          image,
+
+          temperature:
+            0.05,
+
+          max_tokens:
+            1600,
+
+          response_format: {
+            type:
+              "json_schema",
+
+            json_schema:
+              AI_RESPONSE_SCHEMA
+          }
+
+        } as any
+      );
+
+
+    console.log(
+      "AI JSON-SCHEMA RESULT:",
+      JSON.stringify(result)
+    );
+
+
+    const parsed =
+      extractAIResponse(
+        result
+      );
+
+
+    if (
+      parsed
+    ) {
+
+      return parsed;
+    }
+
+
+    /*
+     * If JSON Schema produced an unexpected
+     * response, continue to fallback.
+     */
+
+    console.warn(
+      "JSON Schema response could not be parsed. Starting fallback."
+    );
+
+  } catch (
+    error
+  ) {
+
+    console.warn(
+      "JSON Schema AI request failed:",
+      error
+    );
+  }
+
+
+  /*
+   * ----------------------------------------------------------
+   * SECOND ATTEMPT
+   *
+   * Plain JSON Mode
+   *
+   * This is the important fallback.
+   * ----------------------------------------------------------
+   */
+
+  const fallbackResult =
+    await env.AI.run(
+      MODEL,
+      {
+        messages: [
+
+          {
+            role: "system",
+
+            content:
+              "You are a workplace safety inspection assistant. Return ONLY valid JSON."
+          },
+
+          {
+            role: "user",
+
+            content:
+              buildFallbackPrompt()
+          }
+
+        ],
+
+        image,
+
+        temperature:
+          0,
+
+        max_tokens:
+          1600,
+
+        response_format: {
+          type:
+            "json_object"
+        }
+
+      } as any
+    );
+
+
+  console.log(
+    "AI FALLBACK RESULT:",
+    JSON.stringify(
+      fallbackResult
+    )
+  );
+
+
+  const fallbackParsed =
+    extractAIResponse(
+      fallbackResult
+    );
+
+
+  if (
+    fallbackParsed
+  ) {
+
+    return fallbackParsed;
+  }
+
+
+  /*
+   * Last attempt: return raw response to parser.
+   */
+
+  throw new Error(
+    "Workers AI returned an invalid JSON response."
+  );
 }
 
 
@@ -1541,7 +2042,9 @@ async function analyze(
 
 
     if (
-      !photo.type.startsWith("image/")
+      !photo.type.startsWith(
+        "image/"
+      )
     ) {
 
       return json(
@@ -1555,7 +2058,7 @@ async function analyze(
 
 
     /*
-     * 8 MB maximum.
+     * Maximum 8 MB.
      */
 
     if (
@@ -1591,7 +2094,7 @@ async function analyze(
 
     /*
      * --------------------------------------------------------
-     * IMAGE
+     * Convert photo to Data URL.
      * --------------------------------------------------------
      */
 
@@ -1603,87 +2106,20 @@ async function analyze(
 
     /*
      * --------------------------------------------------------
-     * WORKERS AI
-     *
-     * JSON Mode is supported by this model.
-     * --------------------------------------------------------
-     */
-
-    const aiResult =
-      await env.AI.run(
-        MODEL,
-        {
-          messages: [
-
-            {
-              role: "system",
-
-              content:
-                "You are a careful Singapore workplace safety inspection assistant. Analyse only visible evidence and return the requested structured result."
-            },
-
-            {
-              role: "user",
-
-              content:
-                buildPrompt()
-            }
-
-          ],
-
-          image,
-
-          temperature:
-            0.05,
-
-          max_tokens:
-            1600,
-
-          response_format: {
-            type:
-              "json_schema",
-
-            json_schema:
-              AI_RESPONSE_SCHEMA
-          }
-
-        } as any
-      );
-
-
-    console.log(
-      "Workers AI result:",
-      JSON.stringify(
-        aiResult
-      )
-    );
-
-
-    /*
-     * --------------------------------------------------------
-     * EXTRACT JSON
+     * AI
      * --------------------------------------------------------
      */
 
     const aiData =
-      extractAIResponse(
-        aiResult
+      await runSafetyAI(
+        env,
+        image
       );
-
-
-    if (
-      !aiData
-    ) {
-
-      throw new Error(
-        "Workers AI returned an invalid structured response."
-      );
-    }
 
 
     /*
      * --------------------------------------------------------
-     * NORMALISE FINDINGS
+     * NORMALISE
      * --------------------------------------------------------
      */
 
@@ -1695,7 +2131,7 @@ async function analyze(
 
     /*
      * --------------------------------------------------------
-     * LOAD WSH SAFETY CHECKS
+     * LOAD WSH CHECKS
      * --------------------------------------------------------
      */
 
@@ -1707,7 +2143,7 @@ async function analyze(
 
     /*
      * --------------------------------------------------------
-     * MATCH WSH CHECKS
+     * MATCH WSH GUIDANCE
      * --------------------------------------------------------
      */
 
@@ -1749,7 +2185,7 @@ async function analyze(
 
     /*
      * --------------------------------------------------------
-     * RESPONSE
+     * RETURN
      * --------------------------------------------------------
      */
 
@@ -1809,7 +2245,7 @@ async function analyze(
 
 /*
  * ============================================================
- * RECENT INSPECTIONS
+ * GET RECENT INSPECTIONS
  * ============================================================
  */
 
@@ -1871,7 +2307,7 @@ async function getInspections(
 
 /*
  * ============================================================
- * SINGLE INSPECTION
+ * GET SINGLE INSPECTION
  * ============================================================
  */
 
@@ -2095,7 +2531,7 @@ async function health(
 
 /*
  * ============================================================
- * FETCH
+ * MAIN FETCH
  * ============================================================
  */
 
@@ -2195,110 +2631,4 @@ export default {
 
     /*
      * --------------------------------------------------------
-     * RECENT INSPECTIONS
-     * --------------------------------------------------------
-     */
-
-    if (
-      url.pathname ===
-      "/api/inspections"
-    ) {
-
-      if (
-        request.method !== "GET"
-      ) {
-
-        return json(
-          {
-            error:
-              "Method not allowed."
-          },
-          405
-        );
-      }
-
-
-      return getInspections(
-        env
-      );
-    }
-
-
-    /*
-     * --------------------------------------------------------
-     * SINGLE INSPECTION
-     * --------------------------------------------------------
-     */
-
-    const inspectionPrefix =
-      "/api/inspections/";
-
-
-    if (
-      url.pathname.startsWith(
-        inspectionPrefix
-      )
-    ) {
-
-      const inspectionId =
-        decodeURIComponent(
-          url.pathname.slice(
-            inspectionPrefix.length
-          )
-        );
-
-
-      if (
-        inspectionId
-      ) {
-
-        return getInspection(
-          env,
-          inspectionId
-        );
-      }
-    }
-
-
-    /*
-     * --------------------------------------------------------
-     * FRONTEND
-     * --------------------------------------------------------
-     */
-
-    if (
-      env.ASSETS
-    ) {
-
-      try {
-
-        return env.ASSETS.fetch(
-          request
-        );
-
-      } catch (
-        error
-      ) {
-
-        console.error(
-          "ASSETS ERROR:",
-          error
-        );
-      }
-    }
-
-
-    return new Response(
-      "Safety Inspection AI",
-      {
-        status: 200,
-
-        headers: {
-          "Content-Type":
-            "text/plain"
-        }
-      }
-    );
-  }
-
-};
+    
