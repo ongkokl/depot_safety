@@ -1,0 +1,15 @@
+{
+  "name": "safety-inspection-cloudflare",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:local": "wrangler d1 migrations apply SAFETY_DB --local",
+    "db:remote": "wrangler d1 migrations apply SAFETY_DB --remote",
+    "vector:create": "wrangler vectorize create safety-wsh-index --dimensions=768 --metric=cosine"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

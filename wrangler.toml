@@ -1,0 +1,23 @@
+name = "safety-inspection-ai"
+main = "src/index.ts"
+compatibility_date = "2026-08-13"
+
+[assets]
+directory = "./public"
+
+[ai]
+binding = "AI"
+
+[[d1_databases]]
+binding = "SAFETY_DB"
+database_name = "safety-inspection-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "PHOTOS"
+bucket_name = "safety-inspection-photos"
+
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "safety-wsh-index"
