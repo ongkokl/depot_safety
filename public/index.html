@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Safety Inspection AI</title>
+<style>
+:root{font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;color:#172033;background:#f4f7fb}
+*{box-sizing:border-box}body{margin:0}.top{background:#102a43;color:white;padding:18px 22px;position:sticky;top:0;z-index:5}
+.top h1{margin:0;font-size:20px}.top small{opacity:.75}.wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.card{background:white;border:1px solid #dde5ef;border-radius:16px;padding:20px;box-shadow:0 4px 16px #102a4310}
+@media(max-width:800px){.grid{grid-template-columns:1fr}}
+h2{margin-top:0;font-size:18px}.drop{border:2px dashed #b8c7d9;border-radius:14px;padding:28px;text-align:center;cursor:pointer;background:#fbfdff}
+.drop.drag{border-color:#2f80ed;background:#eef6ff}.drop input{display:none}.preview{display:none;width:100%;max-height:420px;object-fit:contain;border-radius:12px;margin-top:14px}
+label{font-size:13px;font-weight:700;display:block;margin:14px 0 6px}input,select{width:100%;padding:11px;border:1px solid #cbd6e2;border-radius:9px;font-size:14px}
+button{border:0;border-radius:9px;padding:12px 16px;font-weight:800;cursor:pointer}.primary{background:#1261a0;color:#fff;width:100%;margin-top:18px}.secondary{background:#e8eef5;color:#16324f}
+button:disabled{opacity:.5;cursor:not-allowed}.status{margin-top:15px;padding:12px;border-radius:10px;background:#eef3f8;display:none}.status.show{display:block}
+.result{margin-top:18px}.pill{display:inline-block;padding:5px 9px;border-radius:999px;font-size:11px;font-weight:800}
+.pass{background:#dff7e7;color:#176b35}.fail{background:#ffe2e2;color:#9b1c1c}.check{background:#fff0c2;color:#7a5200}.high{color:#a31919}.medium{color:#8a5b00}.low{color:#23723d}
+.finding{border:1px solid #dde5ef;border-radius:12px;padding:14px;margin:10px 0}.finding h3{font-size:15px;margin:0 0 7px}.finding p{margin:5px 0;font-size:13px;line-height:1.45}.source{font-size:12px;margin-top:10px}.source a{color:#1261a0}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid #ffffff66;border-top-color:white;border-radius:50%;animation:rot .8s linear infinite;vertical-align:-2px;margin-right:7px}@keyframes rot{to{transform:rotate(360deg)}}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.stat{background:#f6f9fc;border-radius:12px;padding:14px}.stat b{font-size:24px;display:block}.muted{color:#64748b;font-size:12px}
+.history{margin-top:18px}.row{display:flex;justify-content:space-between;gap:10px;padding:12px 0;border-bottom:1px solid #edf1f5;font-size:13px}
+</style>
+</head>
+<body>
+<div class="top"><h1>Safety Inspection AI</h1><small>WSH-guided visual safety checks</small></div>
+<div class="wrap">
+  <div class="grid">
+    <section class="card">
+      <h2>New Inspection</h2>
+      <label>Inspector</label>
+      <input id="inspector" placeholder="Name">
+      <label>Location</label>
+      <input id="location" placeholder="e.g. P10 Yard">
+      <label>Photo</label>
+      <div id="drop" class="drop">
+        <strong>📷 Take or upload a workplace photo</strong>
+        <div class="muted">AI will identify visible safety situations and match relevant WSH checks.</div>
+        <input id="photo" type="file" accept="image/*" capture="environment">
+      </div>
+      <img id="preview" class="preview">
+      <button id="analyse" class="primary" disabled>Analyse Photo</button>
+      <div id="status" class="status"></div>
+    </section>
+
+    <section class="card">
+      <h2>Inspection Result</h2>
+      <div id="empty" class="muted">Upload a photo and analyse it to see findings.</div>
+      <div id="result" class="result"></div>
+    </section>
+  </div>
+
+  <section class="card history">
+    <h2>Recent Inspections</h2>
+    <div class="stats">
+      <div class="stat"><span class="muted">Inspections</span><b id="statInspections">-</b></div>
+      <div class="stat"><span class="muted">Attention</span><b id="statAttention">-</b></div>
+      <div class="stat"><span class="muted">Check required</span><b id="statCheck">-</b></div>
+    </div>
+    <div id="historyList"></div>
+  </section>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+let selectedFile=null;
+const drop=$("drop"), photo=$("photo"), preview=$("preview"), analyse=$("analyse"), status=$("status");
+
+drop.onclick=()=>photo.click();
+photo.onchange=()=>selectFile(photo.files?.[0]);
+drop.ondragover=e=>{e.preventDefault();drop.classList.add("drag")};
+drop.ondragleave=()=>drop.classList.remove("drag");
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove("drag");selectFile(e.dataTransfer.files?.[0])};
+
+function selectFile(file){
+  if(!file)return;
+  if(!file.type.startsWith("image/")) return alert("Please select an image.");
+  selectedFile=file; preview.src=URL.createObjectURL(file); preview.style.display="block"; analyse.disabled=false;
+}
+function setStatus(msg,show=true){status.innerHTML=msg;status.classList.toggle("show",show)}
+function pill(status){
+  const cls=status==="PASS"?"pass":status==="FAIL"?"fail":"check";
+  return `<span class="pill ${cls}">${status.replaceAll("_"," ")}</span>`;
+}
+function render(data){
+  $("empty").style.display="none";
+  const overall=data.overall_result;
+  $("result").innerHTML=`
+    <div style="margin-bottom:12px"><b>${overall==="ATTENTION"?"🟠 ATTENTION":overall==="PASS"?"🟢 PASS":"🟡 CHECK REQUIRED"}</b>
+      <span class="muted"> · ${data.inspection_no}</span></div>
+    <p class="muted">${escapeHtml(data.scene_summary||"")}</p>
+    ${(data.findings||[]).map(f=>`
+      <div class="finding">
+        <h3>${escapeHtml(f.title||"Safety observation")} ${pill(f.status)}</h3>
+        <p><b>${escapeHtml(f.category||"Other")}</b> · <span class="${String(f.risk_level||"").toLowerCase()}">${escapeHtml(f.risk_level||"") } risk</span> · ${Math.round(Number(f.confidence||0)*100)}% AI confidence</p>
+        <p>${escapeHtml(f.observation||"")}</p>
+        ${f.check_question?`<p><b>WSH check:</b> ${escapeHtml(f.check_question)}</p>`:""}
+        ${f.guidance?`<p class="muted">${escapeHtml(f.guidance)}</p>`:""}
+        ${f.source_url?`<div class="source">Source: <a target="_blank" href="${f.source_url}">${escapeHtml(f.source_title||"WSH Council")}</a></div>`:""}
+      </div>`).join("")}
+    <p class="muted">AI findings are assistance for inspection. Physical/site verification is required before recording a compliance decision.</p>`;
+}
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
+
+analyse.onclick=async()=>{
+  if(!selectedFile)return;
+  analyse.disabled=true;
+  setStatus('<span class="spin"></span>Saving photo and analysing workplace safety…');
+  const fd=new FormData();
+  fd.append("photo",selectedFile);
+  fd.append("inspector",$("inspector").value||"Inspector");
+  fd.append("location",$("location").value||"Unspecified");
+  try{
+    const r=await fetch("/api/analyze",{method:"POST",body:fd});
+    const data=await r.json();
+    if(!r.ok)throw new Error(data.error||"Analysis failed");
+    render(data); setStatus("Analysis complete.");
+    loadHistory();
+  }catch(e){setStatus("❌ "+escapeHtml(e.message));}
+  finally{analyse.disabled=false}
+};
+
+async function loadHistory(){
+  try{
+    const r=await fetch("/api/inspections"); const data=await r.json();
+    const list=data.inspections||[];
+    $("statInspections").textContent=list.length;
+    $("statAttention").textContent=list.filter(x=>x.overall_result==="ATTENTION").length;
+    $("statCheck").textContent=list.filter(x=>x.overall_result==="CHECK_REQUIRED").length;
+    $("historyList").innerHTML=list.slice(0,10).map(x=>`
+      <div class="row"><span><b>${escapeHtml(x.inspection_no)}</b><br><span class="muted">${escapeHtml(x.location)} · ${new Date(x.created_at).toLocaleString()}</span></span>
+      <span>${pill(x.overall_result==="ATTENTION"?"FAIL":x.overall_result)}<br><span class="muted">${x.finding_count} findings</span></span></div>`).join("");
+  }catch(e){}
+}
+loadHistory();
+</script>
+</body>
+</html>
