@@ -174,7 +174,20 @@ export default {
       if (url.pathname === "/api/health") {
         return json({ ok: true, service: "safety-inspection-ai" });
       }
+if (url.pathname === "/api/ai-agree" && request.method === "GET") {
+  const result = await env.AI.run(
+    "@cf/meta/llama-3.2-11b-vision-instruct",
+    {
+      prompt: "agree"
+    }
+  );
 
+  return json({
+    ok: true,
+    message: "Llama Vision model agreement request completed.",
+    result
+  });
+}
       if (url.pathname === "/api/checks" && request.method === "GET") {
         const { results } = await env.SAFETY_DB.prepare(
           "SELECT * FROM safety_checks WHERE active=1 ORDER BY category, id"
