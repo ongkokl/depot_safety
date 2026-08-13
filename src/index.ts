@@ -1,299 +1,15 @@
-/*
- * Safety Inspection AI
- * Cloudflare Worker
- *
- * Uses:
- *   - Workers AI
- *   - D1
- *
- * Does NOT require Vectorize.
- *
- * Current D1 tables expected:
- *
- * inspections
- *   id
- *   inspection_no
- *   location
- *   inspector
- *   created_at
- *   overall_result
- *
- * inspection_photos
- *   id
- *   inspection_id
- *   object_key
- *   file_name
- *   content_type
- *   created_at
- *
- * findings
- *   id
- *   inspection_id
- *   photo_id
- *   category
- *   title
- *   observation
- *   status
- *   risk_level
- *   confidence
- *   check_id
- *   source_title
- *   source_url
- *   created_at
- *
- * safety_checks
- *   id
- *   category
- *   check_question
- *   guidance
- *   source_title
- *   source_url
- *   keywords
- *   active
- *
- * corrective_actions
- *   id
- *   finding_id
- *   description
- *   responsible_person
- *   due_date
- *   status
- *   created_at
- *   completed_at
- */
-
 export interface Env {
-  AI: {
-    run: (
-      model: string,
-      input: Record<string, unknown>
-    ) => Promise<any>;
-  };
-
+  AI: Ai;
   SAFETY_DB: D1Database;
 }
 
+const MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
 
-/* =========================================================
-   CONSTANTS
-   ========================================================= */
+const DEFAULT_SOURCE =
+  "https://www.tal.sg/wshc";
 
-const MODEL =
-  "@cf/meta/llama-3.2-11b-vision-instruct";
-
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-
-const ALLOWED_CATEGORIES = [
-  "PPE",
-  "Work at Height",
-  "Lifting",
-  "Vehicular Safety",
-  "Housekeeping",
-  "Other",
-];
-
-const ALLOWED_STATUS = [
-  "PASS",
-  "CHECK_REQUIRED",
-  "FAIL",
-];
-
-const ALLOWED_RISK = [
-  "LOW",
-  "MEDIUM",
-  "HIGH",
-];
-
-
-/* =========================================================
-   UTILITY FUNCTIONS
-   ========================================================= */
-
-function json(
-  data: unknown,
-  status = 200
-): Response {
-  return new Response(
-    JSON.stringify(data, null, 2),
-    {
-      status,
-      headers: {
-        "content-type": "application/json; charset=UTF-8",
-        "cache-control": "no-store",
-      },
-    }
-  );
-}
-
-
-function text(
-  value: unknown
-): string {
-  if (value === null || value === undefined) {
-    return "";
-  }
-
-  return String(value).trim();
-}
-
-
-function generateId(): string {
-  return crypto.randomUUID();
-}
-
-
-function inspectionNumber(): string {
-  const now = new Date();
-
-  const year = now.getUTCFullYear();
-
-  const month = String(
-    now.getUTCMonth() + 1
-  ).padStart(2, "0");
-
-  const day = String(
-    now.getUTCDate()
-  ).padStart(2, "0");
-
-  const random = crypto
-    .randomUUID()
-    .replace(/-/g, "")
-    .substring(0, 6)
-    .toUpperCase();
-
-  return `SI-${year}${month}${day}-${random}`;
-}
-
-
-function clampConfidence(
-  value: unknown
-): number {
-  let n = Number(value);
-
-  if (!Number.isFinite(n)) {
-    return 0.5;
-  }
-
-  /*
-   * Support either:
-   *
-   * 0.95
-   * or
-   * 95
-   */
-
-  if (n > 1) {
-    n = n / 100;
-  }
-
-  if (n < 0) {
-    n = 0;
-  }
-
-  if (n > 1) {
-    n = 1;
-  }
-
-  return Number(n.toFixed(3));
-}
-
-
-function normaliseStatus(
-  value: unknown
-): string {
-  const s = text(value)
-    .toUpperCase()
-    .replace(/[\s-]+/g, "_");
-
-  if (s === "PASS") {
-    return "PASS";
-  }
-
-  if (
-    s === "FAIL" ||
-    s === "FAILED"
-  ) {
-    return "FAIL";
-  }
-
-  return "CHECK_REQUIRED";
-}
-
-
-function normaliseRisk(
-  value: unknown
-): string {
-  const s = text(value).toUpperCase();
-
-  if (s === "LOW") {
-    return "LOW";
-  }
-
-  if (s === "HIGH") {
-    return "HIGH";
-  }
-
-  return "MEDIUM";
-}
-
-
-function normaliseCategory(
-  value: unknown
-): string {
-  const s = text(value);
-
-  for (const category of ALLOWED_CATEGORIES) {
-    if (
-      s.toLowerCase() ===
-      category.toLowerCase()
-    ) {
-      return category;
-    }
-  }
-
-  return "Other";
-}
-
-
-/* =========================================================
-   IMAGE HANDLING
-   ========================================================= */
-
-function dataUrl(
-  bytes: ArrayBuffer,
-  contentType: string
-): string {
-  const bytesArray = new Uint8Array(bytes);
-
-  let binary = "";
-
-  const chunkSize = 0x8000;
-
-  for (
-    let i = 0;
-    i < bytesArray.length;
-    i += chunkSize
-  ) {
-    const chunk = bytesArray.subarray(
-      i,
-      Math.min(
-        i + chunkSize,
-        bytesArray.length
-      )
-    );
-
-    binary += String.fromCharCode(...chunk);
-  }
-
-  const base64 = btoa(binary);
-
-  return `data:${contentType};base64,${base64}`;
-}
-
-
-/* =========================================================
-   WSH SAFETY CHECKS
-   ========================================================= */
+type FindingStatus = "PASS" | "CHECK_REQUIRED" | "FAIL";
+type RiskLevel = "LOW" | "MEDIUM" | "HIGH";
 
 interface SafetyCheck {
   id: string;
@@ -306,13 +22,222 @@ interface SafetyCheck {
   active: number;
 }
 
+interface AIFinding {
+  category: string;
+  title: string;
+  observation: string;
+  status: FindingStatus;
+  risk_level: RiskLevel;
+  confidence: number;
+  check_id?: string;
+}
+
+interface AIResult {
+  summary: string;
+  findings: AIFinding[];
+}
+
+interface RequestBody {
+  image?: string;
+  location?: string;
+  inspector?: string;
+  fileName?: string;
+  contentType?: string;
+}
+
+/* =========================================================
+   CORS
+   ========================================================= */
+
+function corsHeaders(): HeadersInit {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  };
+}
+
+function jsonResponse(
+  data: unknown,
+  status = 200
+): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      ...corsHeaders(),
+    },
+  });
+}
+
+/* =========================================================
+   BASIC HELPERS
+   ========================================================= */
+
+function cleanText(value: unknown, fallback = ""): string {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  return value.trim();
+}
+
+function clampConfidence(value: unknown): number {
+  const n = Number(value);
+
+  if (!Number.isFinite(n)) {
+    return 0.5;
+  }
+
+  if (n < 0) {
+    return 0;
+  }
+
+  if (n > 1) {
+    return 1;
+  }
+
+  return n;
+}
+
+function normalizeStatus(value: unknown): FindingStatus {
+  const text = String(value ?? "")
+    .trim()
+    .toUpperCase();
+
+  if (
+    text === "FAIL" ||
+    text === "FAILED" ||
+    text === "UNSAFE"
+  ) {
+    return "FAIL";
+  }
+
+  if (
+    text === "PASS" ||
+    text === "PASSED" ||
+    text === "SAFE"
+  ) {
+    return "PASS";
+  }
+
+  return "CHECK_REQUIRED";
+}
+
+function normalizeRisk(value: unknown): RiskLevel {
+  const text = String(value ?? "")
+    .trim()
+    .toUpperCase();
+
+  if (text === "HIGH") {
+    return "HIGH";
+  }
+
+  if (text === "LOW") {
+    return "LOW";
+  }
+
+  return "MEDIUM";
+}
+
+function makeId(prefix = ""): string {
+  const uuid =
+    typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random()
+          .toString(16)
+          .slice(2)}`;
+
+  return prefix ? `${prefix}-${uuid}` : uuid;
+}
+
+function makeInspectionNo(): string {
+  const now = new Date();
+
+  const year = now.getUTCFullYear();
+  const month = String(now.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(now.getUTCDate()).padStart(2, "0");
+
+  const shortId = crypto
+    .randomUUID()
+    .replace(/-/g, "")
+    .substring(0, 6)
+    .toUpperCase();
+
+  return `SI-${year}${month}${day}-${shortId}`;
+}
+
+/* =========================================================
+   IMAGE NORMALISATION
+   ========================================================= */
+
+/**
+ * Cloudflare's Llama Vision model accepts the image as a
+ * base64/data URL string.
+ *
+ * We deliberately do NOT send:
+ *
+ * image: [ ... ]
+ *
+ * because that causes:
+ *
+ * 5006: oneOf at '/' not met
+ * Type mismatch of /image, array not in string
+ */
+function normalizeImage(
+  image: string,
+  contentType = "image/jpeg"
+): string {
+  if (!image) {
+    throw new Error("No image was supplied.");
+  }
+
+  const trimmed = image.trim();
+
+  /*
+   * Already a data URL.
+   */
+  if (trimmed.startsWith("data:image/")) {
+    return trimmed;
+  }
+
+  /*
+   * Already a normal URL.
+   */
+  if (
+    trimmed.startsWith("http://") ||
+    trimmed.startsWith("https://")
+  ) {
+    return trimmed;
+  }
+
+  /*
+   * Remove a possible data URL prefix if the browser
+   * supplied an unusual format.
+   */
+  const base64 = trimmed.replace(
+    /^data:[^;]+;base64,/i,
+    ""
+  );
+
+  const safeContentType =
+    contentType.startsWith("image/")
+      ? contentType
+      : "image/jpeg";
+
+  return `data:${safeContentType};base64,${base64}`;
+}
+
+/* =========================================================
+   SAFETY CHECKS
+   ========================================================= */
 
 async function getSafetyChecks(
   db: D1Database
 ): Promise<SafetyCheck[]> {
-
   const result = await db
-    .prepare(`
+    .prepare(
+      `
       SELECT
         id,
         category,
@@ -325,260 +250,277 @@ async function getSafetyChecks(
       FROM safety_checks
       WHERE active = 1
       ORDER BY category, id
-    `)
+      `
+    )
     .all<SafetyCheck>();
 
-  return result.results || [];
+  return result.results ?? [];
 }
 
+/*
+ * These are fallback checks only.
+ *
+ * Your D1 safety_checks table should eventually contain
+ * your complete WSH inspection library.
+ */
+function fallbackSafetyChecks(): SafetyCheck[] {
+  return [
+    {
+      id: "fallback-ppe",
+      category: "PPE",
+      check_question:
+        "Are workers apparently wearing the PPE required for the visible activity?",
+      guidance:
+        "Check visible PPE such as safety helmets, high-visibility clothing, safety footwear and other PPE relevant to the visible task. Actual PPE requirements must be verified against the site's risk assessment and rules.",
+      source_title: "WSH Council resources",
+      source_url: DEFAULT_SOURCE,
+      keywords:
+        "helmet, hard hat, safety vest, hi vis, PPE, safety shoes",
+      active: 1,
+    },
+
+    {
+      id: "fallback-height",
+      category: "Work at Height",
+      check_question:
+        "Is there a visible fall hazard requiring fall prevention or protection?",
+      guidance:
+        "If work at height or an open edge is visible, verify that suitable guardrails, edge protection, safe access and fall prevention/protection measures are provided.",
+      source_title: "Preventing Falls from Height",
+      source_url:
+        "https://www.tal.sg/wshc/topics/work-at-height/preventing-falls-from-heights",
+      keywords:
+        "height, edge, guardrail, railing, opening, fall, platform",
+      active: 1,
+    },
+
+    {
+      id: "fallback-lifting",
+      category: "Lifting",
+      check_question:
+        "Is a person apparently exposed to a suspended or lifting load?",
+      guidance:
+        "If lifting operations are visible, verify exclusion zones, lifting controls and that persons are not exposed to suspended loads.",
+      source_title: "WSH Council resources",
+      source_url: DEFAULT_SOURCE,
+      keywords:
+        "crane, lifting, suspended load, hoist, container, sling",
+      active: 1,
+    },
+
+    {
+      id: "fallback-traffic",
+      category: "Vehicular Safety",
+      check_question:
+        "Are pedestrian walkways and vehicle routes clearly segregated and free from obstruction?",
+      guidance:
+        "Check that pedestrian walkways and vehicle routes are clearly demarcated, visible and kept free of obstructions.",
+      source_title:
+        "Workplace Traffic Safety Management",
+      source_url:
+        "https://www.tal.sg/wshc/topics/vehicular-safety/workplace-traffic-safety-management",
+      keywords:
+        "vehicle, truck, pedestrian, walkway, traffic, road, driveway",
+      active: 1,
+    },
+
+    {
+      id: "fallback-housekeeping",
+      category: "Housekeeping",
+      check_question:
+        "Are there visible spills, oily, wet or dirty surfaces that could create a slip hazard?",
+      guidance:
+        "Check for spilled substances and oily, wet or dirty surfaces and ensure hazards are controlled promptly.",
+      source_title:
+        "Workplace Housekeeping",
+      source_url:
+        "https://www.tal.sg/wshc/topics/housekeeping/workplace-housekeeping",
+      keywords:
+        "spill, oil, water, wet, dirty, debris, rubbish, obstruction",
+      active: 1,
+    },
+
+    {
+      id: "fallback-machinery",
+      category: "Machinery Safety",
+      check_question:
+        "Are visible machines or moving equipment adequately guarded?",
+      guidance:
+        "If machinery is visible, check whether guards appear to be provided around dangerous moving parts and whether workers appear exposed to moving machinery.",
+      source_title: "WSH Council resources",
+      source_url: DEFAULT_SOURCE,
+      keywords:
+        "machine, machinery, guard, moving part, equipment",
+      active: 1,
+    },
+  ];
+}
 
 /* =========================================================
-   BUILD WSH GUIDANCE FOR AI
+   BUILD WSH PROMPT
    ========================================================= */
 
-function buildGuidanceText(
+function buildSafetyChecksText(
   checks: SafetyCheck[]
 ): string {
-
   if (!checks.length) {
-    return `
-No safety_checks records are currently available.
-
-Use conservative visual safety assessment.
-Do not invent WSH requirements.
-`;
+    return fallbackSafetyChecks()
+      .map(
+        (c) =>
+          `CHECK_ID: ${c.id}
+CATEGORY: ${c.category}
+QUESTION: ${c.check_question}
+GUIDANCE: ${c.guidance}
+SOURCE: ${c.source_title}
+URL: ${c.source_url}
+KEYWORDS: ${c.keywords}`
+      )
+      .join("\n\n");
   }
 
   return checks
-    .map((check, index) => {
-
-      return `
-WSH CHECK ${index + 1}
-
-ID:
-${check.id}
-
-CATEGORY:
-${check.category}
-
-CHECK QUESTION:
-${check.check_question}
-
-GUIDANCE:
-${check.guidance}
-
-SOURCE:
-${check.source_title}
-
-SOURCE URL:
-${check.source_url}
-
-KEYWORDS:
-${check.keywords || ""}
-`;
-    })
-    .join("\n-----------------------------\n");
+    .map(
+      (c) =>
+        `CHECK_ID: ${c.id}
+CATEGORY: ${c.category}
+QUESTION: ${c.check_question}
+GUIDANCE: ${c.guidance}
+SOURCE: ${c.source_title}
+URL: ${c.source_url}
+KEYWORDS: ${c.keywords}`
+    )
+    .join("\n\n");
 }
 
-
-/* =========================================================
-   AI PROMPT
-   ========================================================= */
-
 function buildVisionPrompt(
-  guidance: string
+  checks: SafetyCheck[]
 ): string {
+  const checksText = buildSafetyChecksText(checks);
 
   return `
-You are an AI assistant supporting a workplace safety inspection.
+You are a workplace safety inspection assistant for a Singapore
+workplace inspection application.
 
-The photograph is from a Singapore workplace / depot / container terminal environment.
+You must analyse the supplied workplace photograph.
 
-Your job is to identify ONLY safety conditions that can reasonably be observed from the photograph.
+Use the supplied WSH Council safety checks as the reference
+framework.
 
-Use the WSH safety checks supplied below as guidance.
+IMPORTANT SAFETY RULES:
 
-IMPORTANT:
+1. Only report hazards or conditions that are visibly supported
+   by the photograph.
 
-1. Do not invent hazards.
-2. Do not assume something is unsafe merely because it cannot be seen.
-3. If something important cannot be confirmed from the photograph, use CHECK_REQUIRED.
-4. Use FAIL only when an unsafe condition is clearly visible.
-5. Use PASS only when the relevant condition is visibly satisfactory.
-6. A visible hard hat should normally be treated as PPE PASS if the person is clearly wearing it.
-7. A visible high-visibility vest should normally be treated as PPE PASS if clearly visible.
-8. A guardrail that is visibly present must NOT be reported as "missing".
-9. A crane in the background does NOT automatically mean the worker is exposed to a suspended load.
-10. Do not assume a person is working at height merely because a guardrail is visible.
-11. Do not classify a hazard when the photograph does not provide enough evidence.
-12. Maximum 6 findings.
-13. Prefer specific observations over generic safety statements.
-14. Confidence must represent confidence in the visual observation.
-15. WSH checks should be linked to the supplied safety_checks whenever reasonably applicable.
+2. Do not invent objects, people, vehicles, hazards or activities.
 
-RETURN ONLY JSON.
+3. If something cannot be confirmed from the photograph,
+   use CHECK_REQUIRED instead of FAIL.
 
-DO NOT return Markdown.
+4. A PASS means the relevant safety condition is visibly present
+   or there is no visible indication of the hazard.
 
-DO NOT return a code fence.
+5. A FAIL should only be used where a significant unsafe
+   condition is clearly visible.
 
-DO NOT write an explanation before or after the JSON.
+6. CHECK_REQUIRED means physical/site verification is needed.
 
-Use exactly this JSON structure:
+7. Do not assume that PPE is required merely because a worker
+   is present. Consider the visible activity and context.
+
+8. Do not assume a worker is working at height simply because
+   a railing or platform is visible.
+
+9. Do not assume lifting exposure merely because a crane is
+   visible in the background.
+
+10. For work at height, look for actual visible fall exposure,
+    open edges, openings, platforms, ladders, scaffolds or
+    other height-related hazards.
+
+11. For lifting, look for visible lifting activity, suspended
+    loads or people apparently within a lifting/exclusion zone.
+
+12. For vehicular safety, only apply the check when vehicles,
+    traffic routes, pedestrian routes or related conditions
+    are visible.
+
+13. For housekeeping, look for visible spills, debris,
+    obstructions, poor storage or unsafe access.
+
+14. For PPE, describe only PPE that is actually visible.
+
+15. Do not make legal/compliance determinations from a photograph.
+    The result is an inspection aid requiring human verification.
+
+16. Return ONLY the JSON structure requested by the schema.
+
+17. Generate no Markdown.
+
+18. Do not put explanatory text before or after the JSON.
+
+SELECTING WSH CHECKS:
+
+Use the supplied checks below.
+
+Only create a finding when:
+- the photograph contains something relevant to the check, OR
+- the photograph provides useful evidence for that check.
+
+Do not generate a finding for every check.
+
+Aim for 1 to 6 useful findings.
+
+For each finding:
+- select the most relevant CHECK_ID;
+- use the category from that check;
+- describe what is actually visible;
+- explain what should be verified;
+- assign PASS, CHECK_REQUIRED or FAIL;
+- assign LOW, MEDIUM or HIGH risk;
+- give confidence from 0.0 to 1.0.
+
+If there is no relevant WSH issue, return a small number of
+PASS findings for clearly visible positive conditions.
+
+WSH CHECK LIBRARY:
+
+${checksText}
+
+Return this structure:
 
 {
-  "summary": "Short description of the workplace scene",
+  "summary": "Short description of the workplace scene.",
   "findings": [
     {
       "category": "PPE",
       "title": "Short finding title",
-      "observation": "What is visibly observed",
+      "observation": "What is visibly observed and what should be checked.",
       "status": "PASS",
       "risk_level": "LOW",
       "confidence": 0.95,
-      "check_id": "matching safety check ID or empty string"
+      "check_id": "CHECK_ID_FROM_LIBRARY"
     }
   ]
 }
-
-Allowed categories:
-
-PPE
-Work at Height
-Lifting
-Vehicular Safety
-Housekeeping
-Other
-
-Allowed status:
-
-PASS
-CHECK_REQUIRED
-FAIL
-
-Allowed risk levels:
-
-LOW
-MEDIUM
-HIGH
-
-Only include a finding when there is useful safety information.
-
-If there is no clear hazard but a safety item should be verified, use CHECK_REQUIRED.
-
-WSH SAFETY GUIDANCE:
-
-${guidance}
 `;
 }
 
-
 /* =========================================================
-   AI RESPONSE EXTRACTION
+   JSON EXTRACTION
    ========================================================= */
 
-function getAIText(
-  response: any
-): string {
+function stripCodeFence(text: string): string {
+  let value = text.trim();
 
-  if (response === null ||
-      response === undefined) {
-    return "";
-  }
+  value = value.replace(/^```json\s*/i, "");
+  value = value.replace(/^```\s*/i, "");
+  value = value.replace(/\s*```$/i, "");
 
-  if (typeof response === "string") {
-    return response;
-  }
-
-  /*
-   * Common Workers AI response:
-   *
-   * {
-   *   response: "..."
-   * }
-   */
-
-  if (
-    typeof response.response === "string"
-  ) {
-    return response.response;
-  }
-
-  if (
-    response.result &&
-    typeof response.result.response === "string"
-  ) {
-    return response.result.response;
-  }
-
-  if (
-    response.result &&
-    typeof response.result === "string"
-  ) {
-    return response.result;
-  }
-
-  if (
-    typeof response.output === "string"
-  ) {
-    return response.output;
-  }
-
-  /*
-   * Some models may return text
-   * inside a message.
-   */
-
-  if (
-    response.message &&
-    typeof response.message.content === "string"
-  ) {
-    return response.message.content;
-  }
-
-  return "";
+  return value.trim();
 }
 
-
-/* =========================================================
-   JSON CLEANING
-   ========================================================= */
-
-function cleanAIText(
-  raw: string
-): string {
-
-  let value = raw.trim();
-
-  /*
-   * Remove Markdown code fences.
-   */
-
-  value = value.replace(
-    /^```(?:json)?\s*/i,
-    ""
-  );
-
-  value = value.replace(
-    /\s*```$/i,
-    ""
-  );
-
-  value = value.trim();
-
-  return value;
-}
-
-
-function extractJSONObject(
-  raw: string
-): string | null {
-
-  const cleaned = cleanAIText(raw);
-
-  /*
-   * First try the entire response.
-   */
+function extractJsonObject(text: string): string | null {
+  const cleaned = stripCodeFence(text);
 
   if (
     cleaned.startsWith("{") &&
@@ -587,253 +529,395 @@ function extractJSONObject(
     return cleaned;
   }
 
-  /*
-   * Sometimes the model returns:
-   *
-   * Here is the JSON:
-   * {...}
-   */
-
   const first = cleaned.indexOf("{");
   const last = cleaned.lastIndexOf("}");
 
-  if (
-    first >= 0 &&
-    last > first
-  ) {
-    return cleaned.substring(
-      first,
-      last + 1
-    );
+  if (first >= 0 && last > first) {
+    return cleaned.substring(first, last + 1);
   }
 
   return null;
 }
 
-
 /* =========================================================
-   PARSE AI JSON
+   NORMALISE AI RESULT
    ========================================================= */
 
-interface AIResult {
-  summary: string;
-  findings: any[];
-  structured: boolean;
-  raw: string;
+function normaliseAIResult(
+  raw: unknown
+): AIResult {
+  let parsed: any = raw;
+
+  /*
+   * Workers AI normally returns something like:
+   *
+   * {
+   *   response: "..."
+   * }
+   */
+
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    "response" in parsed
+  ) {
+    parsed = (parsed as any).response;
+  }
+
+  if (typeof parsed === "string") {
+    const jsonText = extractJsonObject(parsed);
+
+    if (!jsonText) {
+      throw new Error(
+        "Workers AI returned an invalid structured response."
+      );
+    }
+
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch {
+      throw new Error(
+        "Workers AI returned invalid JSON."
+      );
+    }
+  }
+
+  /*
+   * Some responses can wrap the result.
+   */
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    parsed.result &&
+    typeof parsed.result === "object"
+  ) {
+    parsed = parsed.result;
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error(
+      "Workers AI returned an invalid structured response."
+    );
+  }
+
+  const summary =
+    typeof parsed.summary === "string"
+      ? parsed.summary.trim()
+      : "Workplace scene analysed.";
+
+  const rawFindings = Array.isArray(parsed.findings)
+    ? parsed.findings
+    : [];
+
+  const findings: AIFinding[] = [];
+
+  for (const item of rawFindings.slice(0, 6)) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+
+    const category =
+      cleanText(item.category, "Other");
+
+    const title =
+      cleanText(item.title, "AI safety observation");
+
+    const observation =
+      cleanText(
+        item.observation,
+        "Physical/site verification is required."
+      );
+
+    if (!title || !observation) {
+      continue;
+    }
+
+    findings.push({
+      category,
+      title,
+      observation,
+      status: normalizeStatus(item.status),
+      risk_level: normalizeRisk(item.risk_level),
+      confidence: clampConfidence(item.confidence),
+      check_id:
+        typeof item.check_id === "string"
+          ? item.check_id
+          : undefined,
+    });
+  }
+
+  /*
+   * Do not allow an empty result to break the whole inspection.
+   */
+  if (!findings.length) {
+    findings.push({
+      category: "Other",
+      title: "AI analysis requires review",
+      observation:
+        "The image was analysed, but no structured safety findings could be confirmed. Physical/site verification is required.",
+      status: "CHECK_REQUIRED",
+      risk_level: "MEDIUM",
+      confidence: 0.5,
+    });
+  }
+
+  return {
+    summary,
+    findings,
+  };
 }
 
+/* =========================================================
+   JSON SCHEMA
+   ========================================================= */
 
-function parseAIResponse(
-  response: any
-): AIResult {
+const AI_RESPONSE_FORMAT = {
+  type: "json_schema",
+  json_schema: {
+    type: "object",
+    properties: {
+      summary: {
+        type: "string",
+      },
 
-  const raw = getAIText(response);
+      findings: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            category: {
+              type: "string",
+            },
 
-  if (!raw) {
-    return {
-      summary:
-        "The AI did not return a usable observation.",
-      findings: [],
-      structured: false,
-      raw: "",
-    };
-  }
+            title: {
+              type: "string",
+            },
 
-  const jsonText =
-    extractJSONObject(raw);
+            observation: {
+              type: "string",
+            },
 
-  if (!jsonText) {
+            status: {
+              type: "string",
+              enum: [
+                "PASS",
+                "CHECK_REQUIRED",
+                "FAIL",
+              ],
+            },
 
-    /*
-     * IMPORTANT:
-     *
-     * Do not fail the whole inspection.
-     *
-     * Save the model response as
-     * a CHECK_REQUIRED finding.
-     */
+            risk_level: {
+              type: "string",
+              enum: [
+                "LOW",
+                "MEDIUM",
+                "HIGH",
+              ],
+            },
 
-    return {
-      summary:
-        "The AI returned an unstructured observation.",
-      findings: [
-        {
-          category: "Other",
-          title:
-            "AI observation requires review",
-          observation: raw,
-          status: "CHECK_REQUIRED",
-          risk_level: "MEDIUM",
-          confidence: 0.5,
-          check_id: "",
+            confidence: {
+              type: "number",
+            },
+
+            check_id: {
+              type: "string",
+            },
+          },
+
+          required: [
+            "category",
+            "title",
+            "observation",
+            "status",
+            "risk_level",
+            "confidence",
+            "check_id",
+          ],
         },
-      ],
-      structured: false,
-      raw,
-    };
-  }
+      },
+    },
+
+    required: [
+      "summary",
+      "findings",
+    ],
+  },
+};
+
+/* =========================================================
+   WORKERS AI
+   ========================================================= */
+
+async function runVisionAI(
+  env: Env,
+  image: string,
+  prompt: string
+): Promise<AIResult> {
+  /*
+   * IMPORTANT:
+   *
+   * Cloudflare's Llama Vision API expects:
+   *
+   * messages: [
+   *   {
+   *     role: "user",
+   *     content: "string"
+   *   }
+   * ]
+   *
+   * image: "base64/data URL string"
+   *
+   * Do NOT put an array into message.content.
+   * Do NOT put an array into image.
+   */
 
   try {
+    const response = await env.AI.run(
+      MODEL,
+      {
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a Singapore workplace safety inspection assistant. Follow the supplied WSH inspection rules exactly. Return only the requested JSON.",
+          },
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
 
-    const parsed =
-      JSON.parse(jsonText);
+        image,
 
+        response_format:
+          AI_RESPONSE_FORMAT,
+
+        temperature: 0.1,
+        max_tokens: 1800,
+        top_p: 0.9,
+      } as any
+    );
+
+    return normaliseAIResult(response);
+  } catch (firstError) {
     /*
-     * Sometimes model returns:
+     * Fallback:
      *
-     * {
-     *   response: {
-     *     summary: ...
-     *   }
-     * }
+     * If JSON Mode cannot be satisfied by the model,
+     * run the same vision request without response_format
+     * and recover JSON from the generated response.
      */
+    try {
+      const fallbackResponse =
+        await env.AI.run(
+          MODEL,
+          {
+            messages: [
+              {
+                role: "system",
+                content:
+                  "You are a workplace safety inspection assistant. Return ONLY valid JSON. Do not use Markdown.",
+              },
+              {
+                role: "user",
+                content: `${prompt}
 
-    const data =
-      parsed?.response &&
-      typeof parsed.response === "object"
-        ? parsed.response
-        : parsed;
+IMPORTANT:
+Return ONLY valid JSON.
+Do not use markdown fences.
+Do not add explanatory text.`,
+              },
+            ],
 
-    const summary =
-      text(data.summary) ||
-      "Workplace scene analysed.";
+            image,
 
-    const findings =
-      Array.isArray(data.findings)
-        ? data.findings
-        : [];
+            temperature: 0.1,
+            max_tokens: 1800,
+            top_p: 0.9,
+          } as any
+        );
 
-    return {
-      summary,
-      findings,
-      structured: true,
-      raw,
-    };
+      return normaliseAIResult(
+        fallbackResponse
+      );
+    } catch (secondError) {
+      const firstMessage =
+        firstError instanceof Error
+          ? firstError.message
+          : String(firstError);
 
-  } catch (error) {
+      const secondMessage =
+        secondError instanceof Error
+          ? secondError.message
+          : String(secondError);
 
-    /*
-     * JSON.parse failure must NOT
-     * cause the whole inspection to fail.
-     */
-
-    return {
-      summary:
-        "The AI returned an observation that requires review.",
-      findings: [
-        {
-          category: "Other",
-          title:
-            "AI analysis requires review",
-          observation: raw,
-          status: "CHECK_REQUIRED",
-          risk_level: "MEDIUM",
-          confidence: 0.5,
-          check_id: "",
-        },
-      ],
-      structured: false,
-      raw,
-    };
+      throw new Error(
+        `Workers AI analysis failed. First attempt: ${firstMessage}. Fallback: ${secondMessage}`
+      );
+    }
   }
 }
 
-
 /* =========================================================
-   MATCH SAFETY CHECK
+   MATCH FINDINGS TO WSH CHECKS
    ========================================================= */
 
-function findBestSafetyCheck(
-  finding: any,
+function findBestCheck(
+  finding: AIFinding,
   checks: SafetyCheck[]
 ): SafetyCheck | null {
-
-  const requestedId =
-    text(finding.check_id);
-
-  if (requestedId) {
-
-    const exact =
-      checks.find(
-        c => c.id === requestedId
-      );
+  /*
+   * First try exact check_id.
+   */
+  if (finding.check_id) {
+    const exact = checks.find(
+      (c) => c.id === finding.check_id
+    );
 
     if (exact) {
       return exact;
     }
   }
 
-  const category =
-    normaliseCategory(
-      finding.category
-    ).toLowerCase();
+  /*
+   * Then category match.
+   */
+  const category = finding.category
+    .toLowerCase()
+    .trim();
 
-  const title =
-    text(finding.title)
-      .toLowerCase();
+  const categoryMatch = checks.find(
+    (c) =>
+      c.category.toLowerCase().trim() === category
+  );
 
-  const observation =
-    text(finding.observation)
-      .toLowerCase();
-
-  const combined =
-    `${category} ${title} ${observation}`;
+  if (categoryMatch) {
+    return categoryMatch;
+  }
 
   /*
-   * Score keyword/category matches.
+   * Then keyword matching.
    */
+  const haystack =
+    `${finding.title} ${finding.observation}`.toLowerCase();
 
-  let best:
-    SafetyCheck | null = null;
-
+  let best: SafetyCheck | null = null;
   let bestScore = 0;
 
   for (const check of checks) {
+    const keywords = cleanText(
+      check.keywords
+    )
+      .toLowerCase()
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
 
     let score = 0;
 
-    if (
-      check.category
-        .toLowerCase() === category
-    ) {
-      score += 5;
-    }
-
-    const keywords =
-      text(check.keywords)
-        .toLowerCase()
-        .split(/[,\s;|]+/)
-        .filter(Boolean);
-
     for (const keyword of keywords) {
-
-      if (
-        keyword.length >= 3 &&
-        combined.includes(keyword)
-      ) {
-        score += 1;
-      }
-    }
-
-    const questionWords =
-      check.check_question
-        .toLowerCase()
-        .split(/\s+/)
-        .filter(
-          word => word.length >= 5
-        );
-
-    for (const word of questionWords) {
-
-      if (
-        combined.includes(
-          word.replace(
-            /[^a-z0-9]/g,
-            ""
-          )
-        )
-      ) {
-        score += 0.25;
+      if (haystack.includes(keyword)) {
+        score++;
       }
     }
 
@@ -846,98 +930,16 @@ function findBestSafetyCheck(
   return best;
 }
 
-
-/* =========================================================
-   NORMALISE FINDING
-   ========================================================= */
-
-function normaliseFinding(
-  raw: any,
-  checks: SafetyCheck[]
-): any {
-
-  const category =
-    normaliseCategory(
-      raw?.category
-    );
-
-  const title =
-    text(raw?.title) ||
-    "Safety condition requires review";
-
-  const observation =
-    text(raw?.observation) ||
-    "The photograph requires physical verification.";
-
-  const status =
-    normaliseStatus(
-      raw?.status
-    );
-
-  const risk =
-    normaliseRisk(
-      raw?.risk_level
-    );
-
-  const confidence =
-    clampConfidence(
-      raw?.confidence
-    );
-
-  const check =
-    findBestSafetyCheck(
-      {
-        ...raw,
-        category,
-        title,
-        observation,
-      },
-      checks
-    );
-
-  return {
-    category,
-    title,
-    observation,
-    status,
-    risk_level: risk,
-    confidence,
-
-    check_id:
-      text(raw?.check_id) ||
-      check?.id ||
-      null,
-
-    source_title:
-      check?.source_title ||
-      null,
-
-    source_url:
-      check?.source_url ||
-      null,
-
-    wsh_check:
-      check?.check_question ||
-      null,
-
-    guidance:
-      check?.guidance ||
-      null,
-  };
-}
-
-
 /* =========================================================
    OVERALL RESULT
    ========================================================= */
 
 function calculateOverallResult(
-  findings: any[]
-): string {
-
+  findings: AIFinding[]
+): FindingStatus {
   if (
     findings.some(
-      f => f.status === "FAIL"
+      (f) => f.status === "FAIL"
     )
   ) {
     return "FAIL";
@@ -945,9 +947,8 @@ function calculateOverallResult(
 
   if (
     findings.some(
-      f =>
-        f.status ===
-        "CHECK_REQUIRED"
+      (f) =>
+        f.status === "CHECK_REQUIRED"
     )
   ) {
     return "CHECK_REQUIRED";
@@ -956,9 +957,8 @@ function calculateOverallResult(
   return "PASS";
 }
 
-
 /* =========================================================
-   SAVE INSPECTION
+   DATABASE SAVE
    ========================================================= */
 
 async function saveInspection(
@@ -968,13 +968,19 @@ async function saveInspection(
     inspectionNo: string;
     location: string;
     inspector: string;
-    createdAt: string;
-    overallResult: string;
+    overallResult: FindingStatus;
+    photoId: string;
+    fileName: string;
+    contentType: string;
+    findings: AIFinding[];
+    checks: SafetyCheck[];
   }
-) {
+): Promise<void> {
+  const now = new Date().toISOString();
 
   await db
-    .prepare(`
+    .prepare(
+      `
       INSERT INTO inspections
       (
         id,
@@ -985,41 +991,27 @@ async function saveInspection(
         overall_result
       )
       VALUES (?, ?, ?, ?, ?, ?)
-    `)
+      `
+    )
     .bind(
       params.inspectionId,
       params.inspectionNo,
       params.location,
       params.inspector,
-      params.createdAt,
+      now,
       params.overallResult
     )
     .run();
-}
-
-
-/* =========================================================
-   SAVE PHOTO
-   ========================================================= */
-
-async function savePhotoRecord(
-  db: D1Database,
-  params: {
-    photoId: string;
-    inspectionId: string;
-    fileName: string;
-    contentType: string;
-  }
-) {
 
   /*
-   * There is currently no R2 requirement.
+   * inspection_photos table exists in your database.
    *
-   * object_key is populated with the photo ID.
+   * We record the image reference even though the current
+   * version does not require an R2 binding.
    */
-
   await db
-    .prepare(`
+    .prepare(
+      `
       INSERT INTO inspection_photos
       (
         id,
@@ -1030,37 +1022,48 @@ async function savePhotoRecord(
         created_at
       )
       VALUES (?, ?, ?, ?, ?, ?)
-    `)
+      `
+    )
     .bind(
       params.photoId,
       params.inspectionId,
-      params.photoId,
+      `inspection/${params.inspectionId}/${params.photoId}`,
       params.fileName,
       params.contentType,
-      new Date().toISOString()
+      now
     )
     .run();
-}
 
+  for (const finding of params.findings) {
+    const findingId = makeId("finding");
 
-/* =========================================================
-   SAVE FINDINGS
-   ========================================================= */
+    const check =
+      findBestCheck(
+        finding,
+        params.checks
+      );
 
-async function saveFindings(
-  db: D1Database,
-  inspectionId: string,
-  photoId: string,
-  findings: any[]
-) {
+    const category =
+      check?.category ||
+      finding.category ||
+      "Other";
 
-  for (const finding of findings) {
+    const checkId =
+      check?.id ||
+      finding.check_id ||
+      null;
 
-    const findingId =
-      generateId();
+    const sourceTitle =
+      check?.source_title ||
+      "WSH Council resources";
+
+    const sourceUrl =
+      check?.source_url ||
+      DEFAULT_SOURCE;
 
     await db
-      .prepare(`
+      .prepare(
+        `
         INSERT INTO findings
         (
           id,
@@ -1078,71 +1081,216 @@ async function saveFindings(
           created_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `)
+        `
+      )
       .bind(
         findingId,
-        inspectionId,
-        photoId,
-        finding.category,
+        params.inspectionId,
+        params.photoId,
+        category,
         finding.title,
         finding.observation,
         finding.status,
         finding.risk_level,
         finding.confidence,
-        finding.check_id,
-        finding.source_title,
-        finding.source_url,
-        new Date().toISOString()
+        checkId,
+        sourceTitle,
+        sourceUrl,
+        now
       )
       .run();
   }
 }
 
-
 /* =========================================================
-   FORMAT RESPONSE FINDING
+   GET RECENT INSPECTIONS
    ========================================================= */
 
-function publicFinding(
-  finding: any
-) {
+async function getRecentInspections(
+  db: D1Database
+): Promise<Response> {
+  const result = await db
+    .prepare(
+      `
+      SELECT
+        id,
+        inspection_no,
+        location,
+        inspector,
+        created_at,
+        overall_result
+      FROM inspections
+      ORDER BY created_at DESC
+      LIMIT 20
+      `
+    )
+    .all();
 
-  return {
-    category:
-      finding.category,
+  const rows = result.results ?? [];
 
-    title:
-      finding.title,
-
-    observation:
-      finding.observation,
-
-    status:
-      finding.status,
-
-    risk_level:
-      finding.risk_level,
-
-    confidence:
-      finding.confidence,
-
-    check_id:
-      finding.check_id,
-
-    wsh_check:
-      finding.wsh_check,
-
-    guidance:
-      finding.guidance,
-
-    source_title:
-      finding.source_title,
-
-    source_url:
-      finding.source_url,
-  };
+  return jsonResponse({
+    success: true,
+    inspections: rows,
+  });
 }
 
+/* =========================================================
+   GET SINGLE INSPECTION
+   ========================================================= */
+
+async function getInspection(
+  db: D1Database,
+  inspectionId: string
+): Promise<Response> {
+  const inspection =
+    await db
+      .prepare(
+        `
+        SELECT
+          id,
+          inspection_no,
+          location,
+          inspector,
+          created_at,
+          overall_result
+        FROM inspections
+        WHERE id = ?
+        LIMIT 1
+        `
+      )
+      .bind(inspectionId)
+      .first();
+
+  if (!inspection) {
+    return jsonResponse(
+      {
+        success: false,
+        error: "Inspection not found.",
+      },
+      404
+    );
+  }
+
+  const findings =
+    await db
+      .prepare(
+        `
+        SELECT
+          id,
+          inspection_id,
+          photo_id,
+          category,
+          title,
+          observation,
+          status,
+          risk_level,
+          confidence,
+          check_id,
+          source_title,
+          source_url,
+          created_at
+        FROM findings
+        WHERE inspection_id = ?
+        ORDER BY created_at ASC
+        `
+      )
+      .bind(inspectionId)
+      .all();
+
+  const photos =
+    await db
+      .prepare(
+        `
+        SELECT
+          id,
+          inspection_id,
+          object_key,
+          file_name,
+          content_type,
+          created_at
+        FROM inspection_photos
+        WHERE inspection_id = ?
+        ORDER BY created_at ASC
+        `
+      )
+      .bind(inspectionId)
+      .all();
+
+  return jsonResponse({
+    success: true,
+    inspection,
+    findings: findings.results ?? [],
+    photos: photos.results ?? [],
+  });
+}
+
+/* =========================================================
+   DASHBOARD SUMMARY
+   ========================================================= */
+
+async function getSummary(
+  db: D1Database
+): Promise<Response> {
+  const total =
+    await db
+      .prepare(
+        `
+        SELECT COUNT(*) AS count
+        FROM inspections
+        `
+      )
+      .first<{ count: number }>();
+
+  const attention =
+    await db
+      .prepare(
+        `
+        SELECT COUNT(*) AS count
+        FROM inspections
+        WHERE overall_result = 'ATTENTION'
+        `
+      )
+      .first<{ count: number }>();
+
+  const checkRequired =
+    await db
+      .prepare(
+        `
+        SELECT COUNT(*) AS count
+        FROM inspections
+        WHERE overall_result = 'CHECK_REQUIRED'
+        `
+      )
+      .first<{ count: number }>();
+
+  const fail =
+    await db
+      .prepare(
+        `
+        SELECT COUNT(*) AS count
+        FROM inspections
+        WHERE overall_result = 'FAIL'
+        `
+      )
+      .first<{ count: number }>();
+
+  return jsonResponse({
+    success: true,
+    summary: {
+      inspections:
+        Number(total?.count ?? 0),
+
+      attention:
+        Number(attention?.count ?? 0),
+
+      check_required:
+        Number(checkRequired?.count ?? 0),
+
+      fail:
+        Number(fail?.count ?? 0),
+    },
+  });
+}
 
 /* =========================================================
    ANALYSE PHOTO
@@ -1152,1042 +1300,495 @@ async function analysePhoto(
   request: Request,
   env: Env
 ): Promise<Response> {
+  let body: RequestBody;
 
-  const form =
-    await request.formData();
+  try {
+    body =
+      (await request.json()) as RequestBody;
+  } catch {
+    return jsonResponse(
+      {
+        success: false,
+        error:
+          "Invalid JSON request body.",
+      },
+      400
+    );
+  }
 
-  const file =
-    form.get("photo") ||
-    form.get("image") ||
-    form.get("file");
+  if (!body.image) {
+    return jsonResponse(
+      {
+        success: false,
+        error: "Please upload an image.",
+      },
+      400
+    );
+  }
 
   const location =
-    text(
-      form.get("location")
+    cleanText(
+      body.location,
+      "Unspecified"
     );
 
   const inspector =
-    text(
-      form.get("inspector")
+    cleanText(
+      body.inspector,
+      "Unspecified"
     );
 
-  if (!(file instanceof File)) {
-
-    return json(
-      {
-        success: false,
-        error:
-          "Please upload an image.",
-      },
-      400
-    );
-  }
-
-  if (
-    !file.type.startsWith(
-      "image/"
-    )
-  ) {
-
-    return json(
-      {
-        success: false,
-        error:
-          "Only image files are supported.",
-      },
-      400
-    );
-  }
-
-  if (
-    file.size >
-    MAX_IMAGE_BYTES
-  ) {
-
-    return json(
-      {
-        success: false,
-        error:
-          "Image is too large. Maximum size is 8 MB.",
-      },
-      413
-    );
-  }
-
-
-  /* -------------------------------------------------------
-     Load WSH safety checks
-     ------------------------------------------------------- */
-
-  const safetyChecks =
-    await getSafetyChecks(
-      env.SAFETY_DB
+  const fileName =
+    cleanText(
+      body.fileName,
+      "inspection-photo.jpg"
     );
 
-  const guidance =
-    buildGuidanceText(
-      safetyChecks
+  const contentType =
+    cleanText(
+      body.contentType,
+      "image/jpeg"
     );
-
-
-  /* -------------------------------------------------------
-     Convert image to data URL
-     ------------------------------------------------------- */
-
-  const imageBytes =
-    await file.arrayBuffer();
-
-  const image =
-    dataUrl(
-      imageBytes,
-      file.type ||
-        "image/jpeg"
-    );
-
-
-  /* -------------------------------------------------------
-     Build AI prompt
-     ------------------------------------------------------- */
-
-  const prompt =
-    buildVisionPrompt(
-      guidance
-    );
-
-
-  /* -------------------------------------------------------
-     Call Workers AI
-     ------------------------------------------------------- */
-
-  let aiResponse: any;
 
   try {
+    /*
+     * Get WSH checks from D1.
+     */
+    let checks =
+      await getSafetyChecks(
+        env.SAFETY_DB
+      );
 
-    aiResponse =
-      await env.AI.run(
-        MODEL,
-        {
-          prompt,
-          image,
+    /*
+     * If no safety checks have been loaded yet,
+     * use a small built-in WSH set.
+     */
+    if (!checks.length) {
+      checks =
+        fallbackSafetyChecks();
+    }
 
-          /*
-           * Keep generation deterministic.
-           */
+    /*
+     * Convert uploaded image to the format expected by
+     * Llama Vision.
+     */
+    const image =
+      normalizeImage(
+        body.image,
+        contentType
+      );
 
-          temperature: 0.1,
+    /*
+     * Build WSH-specific prompt.
+     */
+    const prompt =
+      buildVisionPrompt(checks);
 
-          max_tokens: 1800,
+    /*
+     * Run Workers AI.
+     */
+    const aiResult =
+      await runVisionAI(
+        env,
+        image,
+        prompt
+      );
 
-          top_p: 0.9,
+    /*
+     * Match the model's findings to the D1 WSH checks.
+     */
+    const normalisedFindings =
+      aiResult.findings.map(
+        (finding) => {
+          const check =
+            findBestCheck(
+              finding,
+              checks
+            );
 
-          /*
-           * Also provide messages.
-           * This is supported by the current
-           * Workers AI vision examples.
-           */
+          return {
+            ...finding,
 
-          messages: [
-            {
-              role: "system",
-              content:
-                "You are a workplace safety inspection assistant. Return valid JSON only.",
-            },
-            {
-              role: "user",
-              content: prompt,
-            },
-          ],
+            category:
+              check?.category ||
+              finding.category ||
+              "Other",
+
+            check_id:
+              check?.id ||
+              finding.check_id,
+          };
         }
       );
 
-  } catch (error) {
-
-    console.error(
-      "Workers AI error:",
-      error
-    );
-
-    return json(
-      {
-        success: false,
-        error:
-          "Workers AI analysis failed.",
-        detail:
-          error instanceof Error
-            ? error.message
-            : String(error),
-      },
-      502
-    );
-  }
-
-
-  /* -------------------------------------------------------
-     Parse AI response
-     ------------------------------------------------------- */
-
-  const parsed =
-    parseAIResponse(
-      aiResponse
-    );
-
-
-  /* -------------------------------------------------------
-     Normalise findings
-     ------------------------------------------------------- */
-
-  let findings =
-    parsed.findings
-      .slice(0, 6)
-      .map(
-        finding =>
-          normaliseFinding(
-            finding,
-            safetyChecks
-          )
+    /*
+     * Determine overall inspection status.
+     */
+    const overallResult =
+      calculateOverallResult(
+        normalisedFindings
       );
 
+    /*
+     * Create IDs.
+     */
+    const inspectionId =
+      makeId("inspection");
 
-  /*
-   * If AI returns no findings,
-   * create a review item rather than
-   * creating an empty inspection.
-   */
+    const photoId =
+      makeId("photo");
 
-  if (!findings.length) {
+    const inspectionNo =
+      makeInspectionNo();
 
-    findings = [
-      {
-        category: "Other",
-        title:
-          "No clear safety finding returned",
-        observation:
-          "The photograph was analysed, but no specific safety condition could be reliably classified. Physical verification is required.",
-        status:
-          "CHECK_REQUIRED",
-        risk_level:
-          "MEDIUM",
-        confidence:
-          0.5,
-        check_id:
-          null,
-        source_title:
-          null,
-        source_url:
-          null,
-        wsh_check:
-          null,
-        guidance:
-          null,
-      },
-    ];
-  }
-
-
-  /* -------------------------------------------------------
-     Overall result
-     ------------------------------------------------------- */
-
-  const overallResult =
-    calculateOverallResult(
-      findings
-    );
-
-
-  /* -------------------------------------------------------
-     Create IDs
-     ------------------------------------------------------- */
-
-  const inspectionId =
-    generateId();
-
-  const photoId =
-    generateId();
-
-  const inspectionNo =
-    inspectionNumber();
-
-  const createdAt =
-    new Date().toISOString();
-
-
-  /* -------------------------------------------------------
-     Save D1 records
-     ------------------------------------------------------- */
-
-  try {
-
+    /*
+     * Save everything to D1.
+     */
     await saveInspection(
       env.SAFETY_DB,
       {
         inspectionId,
         inspectionNo,
-        location:
-          location ||
-          "Unspecified",
-        inspector:
-          inspector ||
-          "Unspecified",
-        createdAt,
+        location,
+        inspector,
         overallResult,
-      }
-    );
-
-
-    await savePhotoRecord(
-      env.SAFETY_DB,
-      {
         photoId,
-        inspectionId,
-        fileName:
-          file.name ||
-          "inspection-photo",
-        contentType:
-          file.type ||
-          "image/jpeg",
+        fileName,
+        contentType,
+        findings:
+          normalisedFindings,
+        checks,
       }
     );
 
-
-    await saveFindings(
-      env.SAFETY_DB,
-      inspectionId,
-      photoId,
-      findings
-    );
-
-  } catch (error) {
-
-    console.error(
-      "D1 save error:",
-      error
-    );
-
-    return json(
-      {
-        success: false,
-        error:
-          "Inspection analysis completed but could not be saved to the database.",
-        detail:
-          error instanceof Error
-            ? error.message
-            : String(error),
-      },
-      500
-    );
-  }
-
-
-  /* -------------------------------------------------------
-     Return result
-     ------------------------------------------------------- */
-
-  return json(
-    {
+    /*
+     * Return data to index.html.
+     */
+    return jsonResponse({
       success: true,
 
       inspection: {
-        id:
-          inspectionId,
-
+        id: inspectionId,
         inspection_no:
           inspectionNo,
-
-        location:
-          location ||
-          "Unspecified",
-
-        inspector:
-          inspector ||
-          "Unspecified",
-
+        location,
+        inspector,
         created_at:
-          createdAt,
-
+          new Date().toISOString(),
         overall_result:
           overallResult,
       },
 
       summary:
-        parsed.summary,
-
-      structured:
-        parsed.structured,
+        aiResult.summary,
 
       findings:
-        findings.map(
-          publicFinding
+        normalisedFindings.map(
+          (finding) => {
+            const check =
+              findBestCheck(
+                finding,
+                checks
+              );
+
+            return {
+              category:
+                check?.category ||
+                finding.category,
+
+              title:
+                finding.title,
+
+              observation:
+                finding.observation,
+
+              status:
+                finding.status,
+
+              risk_level:
+                finding.risk_level,
+
+              confidence:
+                finding.confidence,
+
+              check_id:
+                check?.id ||
+                finding.check_id ||
+                null,
+
+              wsh_check:
+                check?.check_question ||
+                null,
+
+              guidance:
+                check?.guidance ||
+                null,
+
+              source_title:
+                check?.source_title ||
+                "WSH Council resources",
+
+              source_url:
+                check?.source_url ||
+                DEFAULT_SOURCE,
+            };
+          }
         ),
-
-      model:
-        MODEL,
-    }
-  );
-}
-
-
-/* =========================================================
-   GET RECENT INSPECTIONS
-   ========================================================= */
-
-async function getRecentInspections(
-  env: Env
-): Promise<Response> {
-
-  try {
-
-    const result =
-      await env.SAFETY_DB
-        .prepare(`
-          SELECT
-            i.id,
-            i.inspection_no,
-            i.location,
-            i.inspector,
-            i.created_at,
-            i.overall_result,
-
-            COUNT(f.id) AS finding_count,
-
-            SUM(
-              CASE
-                WHEN f.status = 'FAIL'
-                THEN 1
-                ELSE 0
-              END
-            ) AS fail_count,
-
-            SUM(
-              CASE
-                WHEN f.status = 'CHECK_REQUIRED'
-                THEN 1
-                ELSE 0
-              END
-            ) AS check_count
-
-          FROM inspections i
-
-          LEFT JOIN findings f
-            ON f.inspection_id = i.id
-
-          GROUP BY
-            i.id,
-            i.inspection_no,
-            i.location,
-            i.inspector,
-            i.created_at,
-            i.overall_result
-
-          ORDER BY
-            i.created_at DESC
-
-          LIMIT 20
-        `)
-        .all();
-
-    return json(
-      {
-        success: true,
-        inspections:
-          result.results || [],
-      }
-    );
-
+    });
   } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : String(error);
 
     console.error(
-      "Recent inspections error:",
-      error
+      "SAFETY ANALYSIS ERROR:",
+      message
     );
 
-    return json(
+    return jsonResponse(
       {
         success: false,
         error:
-          "Unable to load recent inspections.",
-        detail:
-          error instanceof Error
-            ? error.message
-            : String(error),
+          "AI analysis failed.",
+        detail: message,
       },
       500
     );
   }
 }
 
-
 /* =========================================================
-   GET INSPECTION DETAIL
+   API ROUTER
    ========================================================= */
 
-async function getInspection(
+async function handleApi(
+  request: Request,
   env: Env,
-  id: string
+  pathname: string
 ): Promise<Response> {
+  /*
+   * Health
+   */
+  if (
+    pathname === "/api/health" &&
+    request.method === "GET"
+  ) {
+    return jsonResponse({
+      success: true,
+      service:
+        "Safety Inspection AI",
+      ai_model: MODEL,
+      database: "D1",
+      time:
+        new Date().toISOString(),
+    });
+  }
 
-  try {
+  /*
+   * Recent inspections
+   */
+  if (
+    pathname === "/api/inspections" &&
+    request.method === "GET"
+  ) {
+    return getRecentInspections(
+      env.SAFETY_DB
+    );
+  }
 
-    const inspection =
-      await env.SAFETY_DB
-        .prepare(`
-          SELECT
-            id,
-            inspection_no,
-            location,
-            inspector,
-            created_at,
-            overall_result
-          FROM inspections
-          WHERE id = ?
-          LIMIT 1
-        `)
-        .bind(id)
-        .first();
+  /*
+   * Dashboard summary
+   */
+  if (
+    pathname === "/api/summary" &&
+    request.method === "GET"
+  ) {
+    return getSummary(
+      env.SAFETY_DB
+    );
+  }
 
+  /*
+   * Single inspection
+   *
+   * /api/inspections/<id>
+   */
+  if (
+    pathname.startsWith(
+      "/api/inspections/"
+    ) &&
+    request.method === "GET"
+  ) {
+    const id =
+      pathname.substring(
+        "/api/inspections/".length
+      );
 
-    if (!inspection) {
-
-      return json(
+    if (!id) {
+      return jsonResponse(
         {
           success: false,
           error:
-            "Inspection not found.",
+            "Inspection ID is required.",
         },
-        404
+        400
       );
     }
 
-
-    const findings =
-      await env.SAFETY_DB
-        .prepare(`
-          SELECT
-            f.id,
-            f.category,
-            f.title,
-            f.observation,
-            f.status,
-            f.risk_level,
-            f.confidence,
-            f.check_id,
-            f.source_title,
-            f.source_url,
-
-            s.check_question,
-            s.guidance
-
-          FROM findings f
-
-          LEFT JOIN safety_checks s
-            ON s.id = f.check_id
-
-          WHERE f.inspection_id = ?
-
-          ORDER BY
-            f.created_at ASC
-        `)
-        .bind(id)
-        .all();
-
-
-    const photos =
-      await env.SAFETY_DB
-        .prepare(`
-          SELECT
-            id,
-            inspection_id,
-            object_key,
-            file_name,
-            content_type,
-            created_at
-          FROM inspection_photos
-          WHERE inspection_id = ?
-          ORDER BY created_at ASC
-        `)
-        .bind(id)
-        .all();
-
-
-    return json(
-      {
-        success: true,
-
-        inspection,
-
-        findings:
-          findings.results || [],
-
-        photos:
-          photos.results || [],
-      }
-    );
-
-  } catch (error) {
-
-    console.error(
-      "Inspection detail error:",
-      error
-    );
-
-    return json(
-      {
-        success: false,
-        error:
-          "Unable to load inspection.",
-        detail:
-          error instanceof Error
-            ? error.message
-            : String(error),
-      },
-      500
-    );
-  }
-}
-
-
-/* =========================================================
-   DASHBOARD SUMMARY
-   ========================================================= */
-
-async function getSummary(
-  env: Env
-): Promise<Response> {
-
-  try {
-
-    const inspections =
-      await env.SAFETY_DB
-        .prepare(`
-          SELECT COUNT(*) AS total
-          FROM inspections
-        `)
-        .first<any>();
-
-
-    const attention =
-      await env.SAFETY_DB
-        .prepare(`
-          SELECT COUNT(*) AS total
-          FROM inspections
-          WHERE overall_result = 'FAIL'
-        `)
-        .first<any>();
-
-
-    const checkRequired =
-      await env.SAFETY_DB
-        .prepare(`
-          SELECT COUNT(*) AS total
-          FROM inspections
-          WHERE overall_result = 'CHECK_REQUIRED'
-        `)
-        .first<any>();
-
-
-    return json(
-      {
-        success: true,
-
-        inspections:
-          Number(
-            inspections?.total || 0
-          ),
-
-        attention:
-          Number(
-            attention?.total || 0
-          ),
-
-        check_required:
-          Number(
-            checkRequired?.total || 0
-          ),
-      }
-    );
-
-  } catch (error) {
-
-    console.error(
-      "Summary error:",
-      error
-    );
-
-    return json(
-      {
-        success: false,
-        error:
-          "Unable to load summary.",
-      },
-      500
-    );
-  }
-}
-
-
-/* =========================================================
-   HEALTH CHECK
-   ========================================================= */
-
-async function health(
-  env: Env
-): Promise<Response> {
-
-  let database =
-    false;
-
-  let safetyChecks = 0;
-
-  try {
-
-    await env.SAFETY_DB
-      .prepare(
-        "SELECT 1 AS ok"
-      )
-      .first();
-
-    database = true;
-
-    const result =
-      await env.SAFETY_DB
-        .prepare(`
-          SELECT COUNT(*) AS total
-          FROM safety_checks
-          WHERE active = 1
-        `)
-        .first<any>();
-
-    safetyChecks =
-      Number(
-        result?.total || 0
-      );
-
-  } catch (error) {
-
-    console.error(
-      "Health check DB error:",
-      error
+    return getInspection(
+      env.SAFETY_DB,
+      id
     );
   }
 
-
-  return json(
-    {
-      ok: true,
-
-      service:
-        "Safety Inspection AI",
-
-      model:
-        MODEL,
-
-      database,
-
-      active_safety_checks:
-        safetyChecks,
-
-      vectorize:
-        false,
-
-      timestamp:
-        new Date().toISOString(),
-    }
-  );
-}
-
-
-/* =========================================================
-   CORS
-   ========================================================= */
-
-function corsHeaders(): HeadersInit {
-
-  return {
-    "Access-Control-Allow-Origin":
-      "*",
-
-    "Access-Control-Allow-Methods":
-      "GET,POST,OPTIONS",
-
-    "Access-Control-Allow-Headers":
-      "Content-Type",
-
-    "Access-Control-Max-Age":
-      "86400",
-  };
-}
-
-
-function withCors(
-  response: Response
-): Response {
-
-  const headers =
-    new Headers(
-      response.headers
-    );
-
-  const cors =
-    corsHeaders();
-
-  for (
-    const [key, value]
-    of Object.entries(cors)
+  /*
+   * Analyse uploaded image
+   */
+  if (
+    pathname === "/api/analyze" &&
+    request.method === "POST"
   ) {
-    headers.set(
-      key,
-      value
+    return analysePhoto(
+      request,
+      env
     );
   }
 
-  return new Response(
-    response.body,
+  /*
+   * Alternative spelling
+   */
+  if (
+    pathname === "/api/analyse" &&
+    request.method === "POST"
+  ) {
+    return analysePhoto(
+      request,
+      env
+    );
+  }
+
+  /*
+   * Safety checks
+   */
+  if (
+    pathname === "/api/safety-checks" &&
+    request.method === "GET"
+  ) {
+    const checks =
+      await getSafetyChecks(
+        env.SAFETY_DB
+      );
+
+    return jsonResponse({
+      success: true,
+      checks,
+    });
+  }
+
+  return jsonResponse(
     {
-      status:
-        response.status,
-
-      statusText:
-        response.statusText,
-
-      headers,
-    }
+      success: false,
+      error: "API endpoint not found.",
+    },
+    404
   );
 }
 
-
 /* =========================================================
-   MAIN ROUTER
+   WORKER
    ========================================================= */
 
 export default {
-
   async fetch(
     request: Request,
     env: Env
   ): Promise<Response> {
+    /*
+     * CORS pre-flight.
+     */
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: corsHeaders(),
+      });
+    }
 
-    try {
+    const url =
+      new URL(request.url);
 
-      /* -----------------------------------------------
-         OPTIONS
-         ----------------------------------------------- */
-
-      if (
-        request.method ===
-        "OPTIONS"
-      ) {
-
-        return withCors(
-          new Response(
-            null,
-            {
-              status: 204,
-            }
-          )
+    /*
+     * API requests.
+     */
+    if (
+      url.pathname.startsWith(
+        "/api/"
+      )
+    ) {
+      try {
+        return await handleApi(
+          request,
+          env,
+          url.pathname
         );
-      }
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : String(error);
 
-
-      const url =
-        new URL(
-          request.url
-        );
-
-      const pathname =
-        url.pathname;
-
-
-      /* -----------------------------------------------
-         HEALTH
-         ----------------------------------------------- */
-
-      if (
-        pathname ===
-        "/api/health"
-      ) {
-
-        return withCors(
-          await health(env)
-        );
-      }
-
-
-      /* -----------------------------------------------
-         ANALYSE
-         ----------------------------------------------- */
-
-      if (
-        pathname ===
-        "/api/analyse" &&
-        request.method ===
-        "POST"
-      ) {
-
-        return withCors(
-          await analysePhoto(
-            request,
-            env
-          )
-        );
-      }
-
-
-      /*
-       * Support alternative spelling.
-       */
-
-      if (
-        pathname ===
-        "/api/analyze" &&
-        request.method ===
-        "POST"
-      ) {
-
-        return withCors(
-          await analysePhoto(
-            request,
-            env
-          )
-        );
-      }
-
-
-      /* -----------------------------------------------
-         RECENT INSPECTIONS
-         ----------------------------------------------- */
-
-      if (
-        pathname ===
-        "/api/inspections" &&
-        request.method ===
-        "GET"
-      ) {
-
-        return withCors(
-          await getRecentInspections(
-            env
-          )
-        );
-      }
-
-
-      /* -----------------------------------------------
-         SUMMARY
-         ----------------------------------------------- */
-
-      if (
-        pathname ===
-        "/api/summary" &&
-        request.method ===
-        "GET"
-      ) {
-
-        return withCors(
-          await getSummary(env)
-        );
-      }
-
-
-      /* -----------------------------------------------
-         INSPECTION DETAIL
-         ----------------------------------------------- */
-
-      const inspectionMatch =
-        pathname.match(
-          /^\/api\/inspection\/([^/]+)$/
+        console.error(
+          "API ERROR:",
+          message
         );
 
-      if (
-        inspectionMatch &&
-        request.method ===
-        "GET"
-      ) {
-
-        return withCors(
-          await getInspection(
-            env,
-            inspectionMatch[1]
-          )
-        );
-      }
-
-
-      /* -----------------------------------------------
-         ROOT
-         ----------------------------------------------- */
-
-      if (
-        pathname === "/" ||
-        pathname === ""
-      ) {
-
-        return withCors(
-          json(
-            {
-              service:
-                "Safety Inspection AI",
-
-              status:
-                "running",
-
-              endpoints: {
-                health:
-                  "/api/health",
-
-                analyse:
-                  "/api/analyse",
-
-                inspections:
-                  "/api/inspections",
-
-                summary:
-                  "/api/summary",
-
-                inspection:
-                  "/api/inspection/:id",
-              },
-            }
-          )
-        );
-      }
-
-
-      /* -----------------------------------------------
-         NOT FOUND
-         ----------------------------------------------- */
-
-      return withCors(
-        json(
+        return jsonResponse(
           {
             success: false,
             error:
-              "Endpoint not found.",
-          },
-          404
-        )
-      );
-
-    } catch (error) {
-
-      console.error(
-        "Unhandled Worker error:",
-        error
-      );
-
-      return withCors(
-        json(
-          {
-            success: false,
-            error:
-              "Internal server error.",
-            detail:
-              error instanceof Error
-                ? error.message
-                : String(error),
+              "Server error.",
+            detail: message,
           },
           500
-        )
+        );
+      }
+    }
+
+    /*
+     * Let Cloudflare Assets / existing frontend
+     * handle non-API requests.
+     *
+     * This Worker does not require Vectorize.
+     */
+    try {
+      const assetBinding =
+        (env as any).ASSETS;
+
+      if (assetBinding) {
+        return assetBinding.fetch(
+          request
+        );
+      }
+    } catch (error) {
+      console.error(
+        "ASSET ERROR:",
+        error
       );
     }
-  },
 
+    /*
+     * Simple fallback if the Worker is not configured
+     * with an ASSETS binding.
+     */
+    return new Response(
+      "Safety Inspection AI Worker is running. Please configure your frontend/static assets.",
+      {
+        status: 200,
+        headers: {
+          "Content-Type":
+            "text/plain; charset=utf-8",
+        },
+      }
+    );
+  },
 } satisfies ExportedHandler<Env>;
