@@ -1,4 +1,4 @@
-/* Depot Safety AI Worker - Version 2.2
+/* Depot Safety AI Worker - Version 2.3
  *
  * Features:
  * - Cloudflare Workers AI vision analysis
@@ -572,6 +572,232 @@ function normalizeCategory(category: string): string {
   return value;
 }
 
+function inferSafetyCategory(
+  category: string,
+  title: string,
+  observation: string
+): string {
+  const original = normalizeCategory(category);
+  const text = `${category} ${title} ${observation}`
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+
+  /*
+   * Correct generic/object descriptions before WSHC matching.
+   * This prevents a generic "metal structure" or "person" finding
+   * from being matched to an unrelated safety category.
+   */
+
+  if (
+    /hard hat|helmet|high[- ]visibility vest|high[- ]visibility clothing|safety footwear|safety shoes|safety glasses|protective gloves|ppe/.test(text)
+  ) {
+    return "PPE";
+  }
+
+  if (
+    /ladder|scaffold|scaffolding|platform|guardrail|mid[- ]rail|toe[- ]board|elevated access|work at height|working at height/.test(text)
+  ) {
+    return "Work at Height";
+  }
+
+  if (
+    /forklift|fork lift/.test(text)
+  ) {
+    return "Forklift Safety";
+  }
+
+  if (
+    /reach stacker|reachstacker/.test(text)
+  ) {
+    return "Reach Stacker Safety";
+  }
+
+  if (
+    /spreader|sling|lifting gear|lifting equipment|lifting hook|suspended load|crane/.test(text)
+  ) {
+    return "Lifting";
+  }
+
+  if (
+    /welding|weld|grinding|grinder|cutting|hot work|hot-work|torch|spark/.test(text)
+  ) {
+    return "Hot Work";
+  }
+
+  if (
+    /electrical cable|electrical cord|plug|socket|exposed wire|electric tool|power tool/.test(text)
+  ) {
+    return "Electrical Safety";
+  }
+
+  if (
+    /chemical|solvent|paint|container leak|chemical leak|spill kit/.test(text)
+  ) {
+    return "Chemical Safety";
+  }
+
+  if (
+    /oil spill|water spill|wet floor|slippery|trip hazard|obstructed walkway|blocked walkway|debris on floor|hose across walkway|cable across walkway/.test(text)
+  ) {
+    return "Slips, Trips and Falls";
+  }
+
+  if (
+    /blocked|obstruction|clutter|waste|rubbish|debris|poor housekeeping/.test(text)
+  ) {
+    return "Housekeeping";
+  }
+
+  if (
+    /vehicle|truck|lorry|traffic|pedestrian route|reversing|banksman/.test(text)
+  ) {
+    return "Vehicular Safety";
+  }
+
+  if (
+    /container repair|container maintenance|repairing container/.test(text)
+  ) {
+    return "Machinery Safety";
+  }
+
+  return original;
+}
+
+function isActualSafetyFinding(
+  category: string,
+  title: string,
+  observation: string,
+  status: Status
+): boolean {
+  const text = `${category} ${title} ${observation}`
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!text) return false;
+  if (isNegativeVisibilityText(text)) return false;
+
+  /* Generic scene/object descriptions are not safety findings. */
+  const genericObjectPatterns = [
+    /^visible person(?:\s|:)/,
+    /^person(?:\s|:)/,
+    /^visible metal structure(?:\s|:)/,
+    /^metal structure(?:\s|:)/,
+    /^visible concrete surface(?:\s|:)/,
+    /^concrete surface(?:\s|:)/,
+    /^visible road(?:\s|:)/,
+    /^road(?:\s|:)/,
+    /^visible container(?:\s|:)/,
+    /^container(?:\s|:)/,
+    /^visible object(?:\s|:)/,
+    /^object(?:\s|:)/,
+  ];
+
+  const isGenericTitle = genericObjectPatterns.some(re => re.test(text));
+
+  const positiveSafetySignals = [
+    "hazard",
+    "unsafe",
+    "damaged",
+    "broken",
+    "missing",
+    "exposed",
+    "unguarded",
+    "unsecured",
+    "unstable",
+    "blocked",
+    "obstructed",
+    "spill",
+    "leak",
+    "corrosion",
+    "corroded",
+    "crack",
+    "bent",
+    "trip",
+    "slip",
+    "guardrail",
+    "handrail",
+    "toe-board",
+    "top rung",
+    "ladder",
+    "platform",
+    "scaffold",
+    "forklift",
+    "reach stacker",
+    "lifting",
+    "welding",
+    "grinding",
+    "electrical",
+    "chemical",
+    "ppe",
+    "hard hat",
+    "helmet",
+    "high-visibility",
+    "safety footwear",
+    "safety shoes",
+    "confined space",
+    "fire extinguisher",
+    "storage",
+    "stack",
+    "manual handling",
+    "awkward posture",
+  ];
+
+  /* A generic object is acceptable only when the description contains
+     a genuine safety-relevant signal. */
+  if (isGenericTitle) {
+    if (!positiveSafetySignals.some(signal => text.includes(signal))) {
+      return false;
+    }
+  }
+
+  /* Generic positive descriptions of a surface/person/object are not findings. */
+  const nonFindingPatterns = [
+    "smooth and flat",
+    "appears to be a loading dock or a work area",
+    "has a few marks and stains on it",
+    "standing next to",
+    "large metal structure",
+    "appears to be working or inspecting",
+  ];
+
+  if (
+    nonFindingPatterns.some(pattern => text.includes(pattern)) &&
+    !positiveSafetySignals.some(signal => text.includes(signal))
+  ) {
+    return false;
+  }
+
+  /* A PASS finding is valid only when it is tied to an actual safety
+     category such as PPE, housekeeping, traffic segregation, etc. */
+  const validCategories = new Set([
+    "PPE",
+    "Housekeeping",
+    "Vehicular Safety",
+    "Work at Height",
+    "Lifting",
+    "Electrical Safety",
+    "Fire Safety",
+    "Storage and Stacking",
+    "Chemical Safety",
+    "Confined Space",
+    "Forklift Safety",
+    "Reach Stacker Safety",
+    "Loading and Unloading",
+    "Machinery Safety",
+    "Manual Handling",
+    "Hot Work",
+    "Noise",
+    "Risk Assessment",
+    "Slips, Trips and Falls",
+  ]);
+
+  if (!validCategories.has(category)) return false;
+
+  return true;
+}
+
 function detectEquipmentType(category: string, title: string, observation: string, aiType?: string): string {
   const text = `${category} ${title} ${observation}`
     .toLowerCase()
@@ -929,17 +1155,26 @@ function findCheck(
   }
 
   const category = normalizeCategory(finding.category);
+
   const categoryMatches = checks.filter(
-    check => normalizeCategory(check.category).toLowerCase() === category.toLowerCase()
+    check =>
+      normalizeCategory(check.category).toLowerCase() ===
+      category.toLowerCase()
   );
 
   if (categoryMatches.length === 1) return categoryMatches[0];
+
+  if (!categoryMatches.length) {
+    /* Do not match an arbitrary WSHC category just because a keyword such as
+       "surface", "equipment" or "condition" happens to overlap. */
+    return null;
+  }
 
   const combined = `${category} ${finding.title} ${finding.observation}`.toLowerCase();
   let best: SafetyCheck | null = null;
   let bestScore = 0;
 
-  for (const check of categoryMatches.length ? categoryMatches : checks) {
+  for (const check of categoryMatches) {
     const keywords = clean(check.keywords, 500)
       .toLowerCase()
       .split(/[,;|]+/)
@@ -957,7 +1192,7 @@ function findCheck(
     }
   }
 
-  return bestScore > 0 ? best : null;
+  return bestScore > 0 ? best : categoryMatches[0] || null;
 }
 
 function checklistEquipmentTypes(equipmentType: string): string[] {
@@ -1135,13 +1370,21 @@ async function enrichFinding(
   }
 
   if (!selectedCheck && matches.length) {
+    const targetCategory = normalizeCategory(finding.category).toLowerCase();
+
     for (const match of matches) {
       const id = clean(match.id || match.metadata?.check_id || "", 100);
       const candidate = checks.find(check => check.id === id);
-      if (candidate) {
-        selectedCheck = candidate;
-        break;
-      }
+      if (!candidate) continue;
+
+      const candidateCategory = normalizeCategory(
+        clean(match.metadata?.category || candidate.category, 150)
+      ).toLowerCase();
+
+      if (candidateCategory !== targetCategory) continue;
+
+      selectedCheck = candidate;
+      break;
     }
   }
 
@@ -1202,15 +1445,54 @@ async function normalizeFindings(
   const seen = new Set<string>();
 
   for (const item of parsed) {
-    const category = normalizeCategory(item.category);
+    const rawCategory = normalizeCategory(item.category || "");
     const title = cleanMarkdown(item.title, 250);
     const observation = cleanMarkdown(item.observation, 1200);
 
-    if (!category || !observation) continue;
+    if (!observation) continue;
 
-    const key = `${category}|${title}|${observation}`.toLowerCase().replace(/\s+/g, " ");
+    /* Infer a real WSH category from the visible evidence before matching. */
+    const category = inferSafetyCategory(
+      rawCategory,
+      title,
+      observation
+    );
+
+    let status = item.status;
+    let risk = item.risk;
+
+    /* If the model described PPE positively under a generic person finding,
+       turn it into a proper PPE PASS finding. */
+    if (
+      category === "PPE" &&
+      /hard hat|helmet|high[- ]visibility vest|high[- ]visibility clothing/.test(
+        `${title} ${observation}`.toLowerCase()
+      ) &&
+      !/missing|without|not wearing|unsafe|damaged/.test(
+        `${title} ${observation}`.toLowerCase()
+      )
+    ) {
+      status = "PASS";
+      risk = "LOW";
+    }
+
+    if (!isActualSafetyFinding(category, title, observation, status)) {
+      continue;
+    }
+
+    const key = `${category}|${title}|${observation}`
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+
     if (seen.has(key)) continue;
     seen.add(key);
+
+    const detectedEquipment = detectEquipmentType(
+      category,
+      title,
+      observation,
+      item.equipmentType
+    );
 
     const check = findCheck(
       {
@@ -1226,19 +1508,33 @@ async function normalizeFindings(
       category,
       title,
       observation,
-      status: item.status,
-      risk_level: item.risk,
-      confidence: Math.round(Math.max(0, Math.min(1, item.confidence)) * 100) / 100,
+      status,
+      risk_level: risk,
+      confidence: Math.round(
+        Math.max(0, Math.min(1, item.confidence)) * 100
+      ) / 100,
       check_id: check?.id || null,
       source_title: check?.source_title || null,
       source_url: check?.source_url || null,
       source_type: (check?.source_type || null) as SourceType | null,
-      equipment_type: item.equipmentType || null,
+      equipment_type: detectedEquipment,
       visual_checks: [],
       physical_checks: [],
     };
 
     const enriched = await enrichFinding(env, base, checks);
+
+    /* Never retain an unrelated WSHC match. */
+    if (
+      enriched.check_id &&
+      normalizeCategory(enriched.category).toLowerCase() !==
+        normalizeCategory(
+          checks.find(c => c.id === enriched.check_id)?.category || ""
+        ).toLowerCase()
+    ) {
+      continue;
+    }
+
     output.push(enriched);
 
     if (output.length >= MAX_FINDINGS) break;
