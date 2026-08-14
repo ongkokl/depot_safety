@@ -1,4 +1,4 @@
-/* Depot Safety AI Worker - Version 2.3
+/* Depot Safety AI Worker - Version 2.5
  *
  * Features:
  * - Cloudflare Workers AI vision analysis
@@ -386,7 +386,13 @@ etc.
 
 Only return POSITIVE visible observations or a relevant condition that genuinely needs verification.
 
+A visible object by itself is NOT a safety finding. Do not report generic objects, surfaces, containers, roads, people, or background equipment unless there is a concrete safety condition or a clearly identifiable safety-relevant activity/equipment.
+
+Never mark a category PASS merely because something is not visible. If a category is not relevant to the photograph, OMIT it completely.
+
 If the photograph shows a person, equipment, structure, activity or hazard that is relevant to a WSH check, report it.
+
+If equipment has multiple safety functions, report the relevant categories. For example, a frame marked SWL 2500 KG may be relevant to Lifting as well as Work at Height when its elevated platform/access function is visible.
 
 Identify the most specific equipment/activity when possible:
 - LADDER
@@ -621,6 +627,16 @@ function inferSafetyCategory(
   }
 
   if (
+    /swl\s*[:=]?\s*\d+|safe working load|lifting frame|lifting beam|lifting equipment|spreader|sling/.test(text)
+  ) {
+    /* If the same object is clearly elevated/access-related, Work at Height remains relevant.
+       Otherwise treat the visible SWL/lifting evidence as Lifting. */
+    if (!/platform|ladder|scaffold|elevated|work at height/.test(text)) {
+      return 'Lifting';
+    }
+  }
+
+  if (
     /forklift|fork lift/.test(text)
   ) {
     return "Forklift Safety";
@@ -814,6 +830,44 @@ function isActualSafetyFinding(
 
   if (!validCategories.has(category)) return false;
 
+  if (
+    category === 'Vehicular Safety' &&
+    /vehicles? may be present|vehicles? may be|suggests vehicles|presence of .*vehicles/.test(text) &&
+    !/actual vehicle|truck|lorry|forklift|reach stacker|traffic lane|reversing|banksman|pedestrian route/.test(text)
+  ) {
+    return false;
+  }
+
+  /* Category-specific relevance guard: do not infer a safety activity merely
+     because the background suggests it may exist. */
+  const categorySignals: Record<string, RegExp> = {
+    'Vehicular Safety': /vehicle|truck|lorry|forklift|reach stacker|traffic barrier|pedestrian route|reversing|banksman|roadway|traffic lane/,
+    'Forklift Safety': /forklift|fork lift/,
+    'Reach Stacker Safety': /reach stacker|reachstacker/,
+    'Electrical Safety': /electrical|cable|cord|plug|socket|wire|power tool|electric tool/,
+    'Chemical Safety': /chemical|solvent|paint container|paint can|spill kit|leak/,
+    'Confined Space': /confined space|manhole|tank|vessel|enclosed space/,
+    'Hot Work': /welding|weld|grinding|grinder|cutting|torch|spark|hot work/,
+    'Manual Handling': /manual handling|lifting by hand|carrying|awkward posture|heavy load by hand/,
+    'Noise': /noise|hearing protection|ear plug|earmuff/,
+    'Risk Assessment': /risk assessment|safe work procedure|swp|permit|permit board/,
+    'Fire Safety': /fire extinguisher|fire hose|fire alarm|fire exit|fire point|flammable/,
+  };
+  const signalPattern = categorySignals[category];
+  if (signalPattern && !signalPattern.test(text)) return false;
+
+  /* PASS is only meaningful when the photograph visibly supports the pass.
+     Never turn absence of an object into PASS. */
+  if (status === 'PASS') {
+    const passSignals = [
+      'wearing', 'appropriate', 'satisfactory', 'clear', 'clean',
+      'segregated', 'secured', 'guardrail', 'hard hat', 'helmet',
+      'high-visibility', 'no obstruction', 'properly', 'intact',
+      'in good condition', 'safe access', 'marked', 'labelled'
+    ];
+    if (!passSignals.some(signal => text.includes(signal))) return false;
+  }
+
   return true;
 }
 
@@ -841,7 +895,9 @@ function detectEquipmentType(category: string, title: string, observation: strin
     text.includes("ladder and platform") ||
     text.includes("ladder with platform") ||
     text.includes("elevated access structure") ||
-    text.includes("access structure with")
+    text.includes("elevated platform") ||
+    text.includes("access structure with") ||
+    (text.includes("work at height") && /metal frame|metal structure|platform|access structure/.test(text))
   ) {
     return "MOBILE_ACCESS_PLATFORM";
   }
@@ -862,6 +918,10 @@ function detectEquipmentType(category: string, title: string, observation: strin
   }
 
   if (
+    text.includes("lifting frame") ||
+    text.includes("lifting beam") ||
+    text.includes("swl") ||
+    text.includes("safe working load") ||
     text.includes("spreader") ||
     text.includes("sling") ||
     text.includes("lifting gear") ||
@@ -894,7 +954,9 @@ function detectEquipmentType(category: string, title: string, observation: strin
   if (
     text.includes("chemical") ||
     text.includes("solvent") ||
-    text.includes("paint")
+    text.includes("paint container") ||
+    text.includes("paint can") ||
+    text.includes("paint chemical")
   ) {
     return "CHEMICAL";
   }
@@ -992,85 +1054,48 @@ function parseLegacyVisualResponse(raw: string): Array<{
     equipmentType: string;
   }> = [];
 
-  const blocks = raw
-    .replace(/\r/g, "")
-    .split(/\n(?=\s*\*\s+\*\*[^*]+\*\*)/);
+  const text = raw.replace(/\r/g, '').trim();
 
-  for (const block of blocks) {
-    const categoryMatch =
-      block.match(/\*\*\s*([A-Za-z][^*\n]+?)\s*\*\*/);
-
-    if (!categoryMatch) continue;
-
-    const category = normalizeCategory(categoryMatch[1]);
-    if (
-      [
-        "Title",
-        "Observation",
-        "Status",
-        "Risk",
-        "Confidence",
-        "Check ID",
-        "Category",
-      ].includes(category)
-    ) {
-      continue;
+  // Format A: structured markdown blocks with Title/Observation fields.
+  const headingRegex = /(?:^|\n)\s*\*\*([^*\n]+)\*\*\s*(?=\n|$)/g;
+  const headings: Array<{ index: number; category: string }> = [];
+  let hm: RegExpExecArray | null;
+  while ((hm = headingRegex.exec(text)) !== null) {
+    const category = cleanMarkdown(hm[1], 120);
+    if (category && !['Title','Observation','Status','Risk','Confidence','Check ID','Category'].includes(category)) {
+      headings.push({ index: hm.index, category });
     }
+  }
 
-    const lines = block
-      .split("\n")
-      .map(line => line.replace(/^\s*\*\s*/, "").trim())
-      .filter(Boolean);
+  for (let i = 0; i < headings.length; i++) {
+    const startIndex = headings[i].index;
+    const endIndex = i + 1 < headings.length ? headings[i + 1].index : text.length;
+    const block = text.substring(startIndex, endIndex);
+    const category = normalizeCategory(headings[i].category);
 
-    const detailLines = lines.filter(line => {
-      const lower = line.toLowerCase();
-      return (
-        !lower.startsWith("**title:**") &&
-        !lower.startsWith("**observation:**") &&
-        !lower.startsWith("**status:**") &&
-        !lower.startsWith("**risk:**") &&
-        !lower.startsWith("**confidence:**") &&
-        !lower.startsWith("**check id:**") &&
-        !/^\*\*[^*]+\*\*$/.test(line)
-      );
-    });
+    const titleMatch = block.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Title:\*\*\s*(.+?)(?=\n|$)/i);
+    const observationMatch = block.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Observation:\*\*\s*(.+?)(?=\n|$)/i);
+    const statusMatch = block.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Status:\*\*\s*(PASS|FAIL|CHECK_REQUIRED)/i);
+    const riskMatch = block.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Risk:\*\*\s*(LOW|MEDIUM|HIGH)/i);
+    const confidenceMatch = block.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Confidence:\*\*\s*([0-9.]+)/i);
+    const checkIdMatch = block.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Check ID:\*\*\s*([^\s\n]+)/i);
 
-    const titleMatch = block.match(/\*\*Title:\*\*\s*(.+?)(?:\n|$)/i);
-    const observationMatch = block.match(/\*\*Observation:\*\*\s*(.+?)(?:\n|$)/i);
-    const statusMatch = block.match(/\*\*Status:\*\*\s*(PASS|FAIL|CHECK_REQUIRED)/i);
-    const riskMatch = block.match(/\*\*Risk:\*\*\s*(LOW|MEDIUM|HIGH)/i);
-    const confidenceMatch = block.match(/\*\*Confidence:\*\*\s*([0-9.]+)/i);
-    const checkIdMatch = block.match(/\*\*Check ID:\*\*\s*([^\s\n]+)/i);
-
-    let observation = cleanMarkdown(observationMatch?.[1] || "", 1200);
-
-    // Some vision responses return a simple bullet list rather than
-    // Title/Observation fields. Convert the visible bullets into one observation.
+    let observation = cleanMarkdown(observationMatch?.[1] || '', 1200);
     if (!observation) {
-      const visibleBullets = detailLines
-        .filter(line => !line.startsWith("**"))
+      const bullets = block.split('\n')
+        .map(line => line.replace(/^\s*[-*•]\s*/, '').trim())
+        .filter(line => line && !/^\*\*[^*]+\*\*$/.test(line))
+        .filter(line => !/^\*\*(Title|Observation|Status|Risk|Confidence|Check ID):/i.test(line))
         .filter(line => !isNegativeVisibilityText(line))
         .slice(0, 3);
-
-      if (visibleBullets.length) {
-        observation = visibleBullets.join(" ");
-      }
+      observation = cleanMarkdown(bullets.join(' '), 1200);
     }
 
-    if (!observation || isNegativeVisibilityText(`${category} ${observation}`)) {
-      continue;
-    }
+    if (!observation || isNegativeVisibilityText(`${category} ${observation}`)) continue;
 
-    const title = cleanMarkdown(
-      titleMatch?.[1] ||
-      (category === "Work at Height"
-        ? "Work-at-height equipment requires verification"
-        : `Visible ${category.toLowerCase()} condition`),
-      250
-    );
-
-    const status = normalizeStatus(statusMatch?.[1] || "", observation);
-    const risk = normalizeRisk(riskMatch?.[1] || "", status);
+    const title = cleanMarkdown(titleMatch?.[1] || defaultFindingTitle(category, observation), 250);
+    const status = normalizeStatus(statusMatch?.[1] || '', observation);
+    const risk = normalizeRisk(riskMatch?.[1] || '', status);
 
     results.push({
       category,
@@ -1078,15 +1103,73 @@ function parseLegacyVisualResponse(raw: string): Array<{
       observation,
       status,
       risk,
-      confidence: parseConfidence(confidenceMatch?.[1] || ""),
-      checkId: cleanMarkdown(checkIdMatch?.[1] || "", 100),
+      confidence: parseConfidence(confidenceMatch?.[1] || ''),
+      checkId: cleanMarkdown(checkIdMatch?.[1] || '', 100),
       equipmentType: detectEquipmentType(category, title, observation),
     });
+    if (results.length >= MAX_FINDINGS) return results;
+  }
 
+  if (results.length) return results;
+
+  // Format B: bullet/colon format produced by the vision model, e.g.
+  // * **Work at Height**: The blue frame ... CHECK_REQUIRED
+  // * **Housekeeping**: ... PASS
+  const lineRegex = /(?:^|\n)\s*(?:[-*•]|\d+[.)])\s*\*\*([^*\n]+)\*\*\s*[:\-–—]\s*(.+?)(?=\n\s*(?:[-*•]|\d+[.)])\s*\*\*|$)/gs;
+  let lm: RegExpExecArray | null;
+  while ((lm = lineRegex.exec(text)) !== null) {
+    const category = normalizeCategory(cleanMarkdown(lm[1], 120));
+    let body = cleanMarkdown(lm[2], 1400);
+    if (!category || !body || isNegativeVisibilityText(body)) continue;
+
+    const statusMatch = body.match(/\b(PASS|FAIL|CHECK_REQUIRED)\b/i);
+    const riskMatch = body.match(/\b(LOW|MEDIUM|HIGH)\s+risk\b/i);
+    const confidenceMatch = body.match(/\b(?:confidence|AI confidence)\s*[:=]?\s*([0-9.]+%?)\b/i);
+    const checkIdMatch = body.match(/\b(?:check\s*id)\s*[:=]?\s*([A-Za-z0-9_-]+)\b/i);
+
+    const status = normalizeStatus(statusMatch?.[1] || '', body);
+    const risk = normalizeRisk(riskMatch?.[1] || '', status);
+    const confidence = parseConfidence(confidenceMatch?.[1] || '');
+
+    body = body
+      .replace(/(?:Therefore,?\s*)?(?:a|the)\s+(?:PASS|FAIL|CHECK_REQUIRED)?\s*status\s+is\s+(?:assigned|given)\.?/ig, '')
+      .replace(/\b(?:PASS|FAIL|CHECK_REQUIRED)\b(?:\s+status)?/ig, '')
+      .replace(/\b(?:LOW|MEDIUM|HIGH)\s+risk\b/ig, '')
+      .replace(/\b(?:confidence|AI confidence)\s*[:=]?\s*[0-9.]+%?\b/ig, '')
+      .replace(/\b(?:check\s*id)\s*[:=]?\s*[A-Za-z0-9_-]+\b/ig, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!body) continue;
+
+    const equipmentType = detectEquipmentType(category, category, body);
+    results.push({
+      category,
+      title: defaultFindingTitle(category, body),
+      observation: body,
+      status,
+      risk,
+      confidence,
+      checkId: cleanMarkdown(checkIdMatch?.[1] || '', 100),
+      equipmentType,
+    });
     if (results.length >= MAX_FINDINGS) break;
   }
 
   return results;
+}
+
+function defaultFindingTitle(category: string, observation: string): string {
+  const text = observation.toLowerCase();
+  if (category === 'Work at Height' && /platform|ladder|scaffold|elevated/.test(text)) {
+    return 'Elevated access structure requires verification';
+  }
+  if (category === 'Lifting' && /swl|lifting|sling|spreader|frame/.test(text)) {
+    return 'Lifting equipment requires verification';
+  }
+  if (category === 'PPE') return 'Visible PPE appears appropriate';
+  if (category === 'Housekeeping') return 'Housekeeping condition requires review';
+  return `Visible ${category.toLowerCase()} condition`;
 }
 
 function parseStructuredAIResponse(raw: string): Array<{
@@ -1099,35 +1182,46 @@ function parseStructuredAIResponse(raw: string): Array<{
   checkId: string;
   equipmentType: string;
 }> {
+  const results: Array<{
+    category: string;
+    title: string;
+    observation: string;
+    status: Status;
+    risk: Risk;
+    confidence: number;
+    checkId: string;
+    equipmentType: string;
+  }> = [];
+
   const json = extractJson(raw);
-
   if (json) {
-    const source = Array.isArray(json) ? json : json.findings;
+    const source = Array.isArray(json)
+      ? json
+      : Array.isArray(json.findings)
+        ? json.findings
+        : Array.isArray(json.response?.findings)
+          ? json.response.findings
+          : Array.isArray(json.result?.findings)
+            ? json.result.findings
+            : null;
 
-    if (Array.isArray(source)) {
-      const results: Array<{
-        category: string;
-        title: string;
-        observation: string;
-        status: Status;
-        risk: Risk;
-        confidence: number;
-        checkId: string;
-        equipmentType: string;
-      }> = [];
-
+    if (source) {
       for (const item of source) {
-        if (!item || typeof item !== "object") continue;
-
-        const category = normalizeCategory(cleanMarkdown(item.category || ""));
-        const title = cleanMarkdown(item.title || `${category} observation`, 250);
-        const observation = cleanMarkdown(item.observation || "", 1200);
-
+        if (!item || typeof item !== 'object') continue;
+        const category = normalizeCategory(cleanMarkdown((item as any).category || '', 120));
+        const title = cleanMarkdown((item as any).title || defaultFindingTitle(category, (item as any).observation || ''), 250);
+        const observation = cleanMarkdown((item as any).observation || '', 1200);
         if (!category || !observation) continue;
-        if (isNegativeVisibilityText(`${title} ${observation}`)) continue;
+        if (isNegativeVisibilityText(`${category} ${title} ${observation}`)) continue;
 
-        const status = normalizeStatus(item.status, observation);
-        const risk = normalizeRisk(item.risk, status);
+        const status = normalizeStatus((item as any).status, observation);
+        const risk = normalizeRisk((item as any).risk, status);
+        const equipmentType = detectEquipmentType(
+          category,
+          title,
+          observation,
+          (item as any).equipment_type
+        );
 
         results.push({
           category,
@@ -1135,32 +1229,21 @@ function parseStructuredAIResponse(raw: string): Array<{
           observation,
           status,
           risk,
-          confidence: parseConfidence(item.confidence),
-          checkId: cleanMarkdown(item.check_id || "", 100),
-          equipmentType: detectEquipmentType(
-            category,
-            title,
-            observation,
-            item.equipment_type
-          ),
+          confidence: parseConfidence((item as any).confidence),
+          checkId: cleanMarkdown((item as any).check_id || '', 100),
+          equipmentType,
         });
-
         if (results.length >= MAX_FINDINGS) break;
       }
-
       if (results.length) return results;
     }
   }
 
-  // Important fallback:
-  // Vision models sometimes ignore JSON-only instructions and return
-  // Markdown/bullet observations. Do not fail the whole inspection.
   const legacy = parseLegacyVisualResponse(raw);
-
   if (legacy.length) return legacy;
 
   throw new Error(
-    `Scene analysis returned no usable structured findings: ${raw.substring(0, 5000)}`
+    `Scene analysis returned no usable findings. Raw AI output: ${raw.substring(0, 5000)}`
   );
 }
 
@@ -1446,6 +1529,46 @@ async function enrichFinding(
   };
 }
 
+function inferSecondaryCategories(
+  category: string,
+  title: string,
+  observation: string,
+  equipmentType: string
+): string[] {
+  const text = `${category} ${title} ${observation} ${equipmentType}`.toLowerCase();
+  const categories: string[] = [];
+
+  if (
+    /swl\s*[:=]?\s*\d+|safe working load|lifting frame|lifting beam|spreader|sling|lifting gear/.test(text) &&
+    !categories.includes('Lifting')
+  ) {
+    categories.push('Lifting');
+  }
+
+  if (
+    /platform|ladder|scaffold|elevated access|work at height|fall protection|guardrail/.test(text) &&
+    !categories.includes('Work at Height')
+  ) {
+    categories.push('Work at Height');
+  }
+
+  if (
+    /welding|weld|grinding|cutting|hot work|torch|spark/.test(text) &&
+    !categories.includes('Hot Work')
+  ) {
+    categories.push('Hot Work');
+  }
+
+  if (
+    /forklift|reach stacker|truck|lorry|vehicle|traffic|reversing/.test(text) &&
+    !categories.includes('Vehicular Safety')
+  ) {
+    categories.push('Vehicular Safety');
+  }
+
+  return categories;
+}
+
 async function normalizeFindings(
   parsed: Array<{
     category: string;
@@ -1555,6 +1678,54 @@ async function normalizeFindings(
     }
 
     output.push(enriched);
+
+    /* Add a secondary safety category when the same visible equipment clearly
+       has more than one safety relevance, e.g. a frame marked SWL with an
+       elevated platform can be both Lifting and Work at Height. */
+    if (output.length < MAX_FINDINGS) {
+      const secondaryCategories = inferSecondaryCategories(
+        category,
+        title,
+        observation,
+        detectedEquipment
+      ).filter(c => c.toLowerCase() !== category.toLowerCase());
+
+      for (const secondaryCategory of secondaryCategories) {
+        if (output.length >= MAX_FINDINGS) break;
+        const secondaryCheck = findCheck(
+          {
+            category: secondaryCategory,
+            title,
+            observation,
+            checkId: ''
+          },
+          checks
+        );
+        if (!secondaryCheck) continue;
+
+        const secondaryBase: Finding = {
+          ...enriched,
+          category: secondaryCategory,
+          check_id: secondaryCheck.id,
+          source_title: secondaryCheck.source_title,
+          source_url: secondaryCheck.source_url,
+          source_type: (secondaryCheck.source_type || 'WSHC_DERIVED') as SourceType,
+          status: 'CHECK_REQUIRED',
+          risk_level: enriched.risk_level === 'LOW' ? 'MEDIUM' : enriched.risk_level,
+          equipment_type: detectedEquipment,
+          visual_checks: [],
+          physical_checks: [],
+        };
+        const secondaryEnriched = await enrichFinding(env, secondaryBase, checks);
+        const secondaryKey = `${secondaryEnriched.category}|${secondaryEnriched.title}|${secondaryEnriched.observation}`
+          .toLowerCase()
+          .replace(/\s+/g, ' ');
+        if (!seen.has(secondaryKey)) {
+          seen.add(secondaryKey);
+          output.push(secondaryEnriched);
+        }
+      }
+    }
 
     if (output.length >= MAX_FINDINGS) break;
   }
@@ -1945,6 +2116,7 @@ async function health(env: Env): Promise<Response> {
   return jsonResponse({
     ok: database && safetyChecks && r2 && vectorize && checklist,
     worker: "depot-safety",
+    version: "2.5",
     model: MODEL,
     embedding_model: EMBEDDING_MODEL,
     database,
