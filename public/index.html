@@ -1524,10 +1524,18 @@
          * Check Worker response.
          */
 
+        /*
+         * Current Worker responses use `ok: true`.
+         * Keep compatibility with the older `success: true`
+         * response format as well.
+         */
         if (
           !response.ok ||
           !data ||
-          !data.success
+          !(
+            data.ok === true ||
+            data.success === true
+          )
         ) {
 
           throw new Error(
@@ -2011,7 +2019,10 @@
 
         if (
           !data ||
-          !data.success
+          !(
+            data.ok === true ||
+            data.success === true
+          )
         ) {
           return;
         }
@@ -2091,10 +2102,14 @@
 
         if (
           !data ||
-          !data.success
+          !(
+            data.ok === true ||
+            data.success === true
+          )
         ) {
 
           throw new Error(
+            data?.error ||
             "Unable to load inspections."
           );
 
