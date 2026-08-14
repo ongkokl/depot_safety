@@ -495,14 +495,14 @@ async function callVisionAI(
   env: Env,
   imageData: string,
   prompt: string,
-  useSchema: boolean
+  schema: any
 ): Promise<any> {
   const input: any = {
     messages: [
       {
         role: "system",
         content:
-          "You are a careful Singapore workplace safety visual inspection assistant. Return only structured JSON containing visible safety findings. Never describe categories that are not relevant to the photograph."
+          "You are a workplace safety visual inspection assistant. Return ONLY a JSON object that conforms exactly to the supplied schema. Do not write explanations, Markdown, headings, bullets, or prose. Only report safety-relevant conditions that are visibly supported by the photograph. If no relevant safety condition is visible, return an empty findings array."
       },
       {
         role: "user",
@@ -510,25 +510,59 @@ async function callVisionAI(
       }
     ],
     image: imageData,
-    max_tokens: 1400,
-    temperature: 0.05,
-    top_p: 0.8,
-    stream: false
-  };
-
-  if (useSchema) {
-    input.response_format = {
+    max_tokens: 900,
+    temperature: 0,
+    top_p: 0.7,
+    stream: false,
+    response_format: {
       type: "json_schema",
-      json_schema: AI_FINDINGS_JSON_SCHEMA
-    };
-  } else {
-    input.response_format = {
-      type: "json_object"
-    };
-  }
+      json_schema: schema
+    }
+  };
 
   return env.AI.run(MODEL, input);
 }
+
+const MINIMAL_AI_FINDINGS_SCHEMA = {
+  type: "object",
+  properties: {
+    findings: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          category: { type: "string" },
+          title: { type: "string" },
+          observation: { type: "string" },
+          status: {
+            type: "string",
+            enum: ["PASS", "FAIL", "CHECK_REQUIRED"]
+          },
+          risk: {
+            type: "string",
+            enum: ["LOW", "MEDIUM", "HIGH"]
+          },
+          confidence: {
+            type: "number",
+            minimum: 0,
+            maximum: 1
+          },
+          equipment_type: { type: "string" }
+        },
+        required: [
+          "category",
+          "title",
+          "observation",
+          "status",
+          "risk",
+          "confidence",
+          "equipment_type"
+        ]
+      }
+    }
+  },
+  required: ["findings"]
+};
 
 async function runAI(
   env: Env,
@@ -537,36 +571,71 @@ async function runAI(
   checks: SafetyCheck[]
 ): Promise<{ raw: string; result: any; mode: string }> {
   const imageData = imageDataUrl(image, contentType);
-  const prompt = buildPrompt(checks);
+
+  // Do NOT include Markdown formatting instructions here.
+  // JSON Schema is now the single source of truth for the AI output.
+  const prompt = `
+Analyse this workplace safety photograph for a Singapore container depot / repair yard.
+
+Return ONLY safety-relevant findings that are visibly supported by the photograph.
+
+Rules:
+- Do not report an item merely because it is not visible.
+- Do not create PASS findings such as "no forklift visible" or "no electrical equipment visible".
+- Do not infer that vehicles, chemicals, lifting operations or other activities exist merely because the location looks like a depot.
+- Do not report generic objects unless they create or represent a relevant safety condition.
+- PPE should only be reported when people and PPE are actually visible.
+- If an elevated platform, ladder, scaffold or access structure is visible, report Work at Height when relevant.
+- If lifting equipment, a lifting frame, spreader, sling, hook, SWL marking or lifting activity is visibly present, report Lifting when relevant.
+- Multiple relevant categories may be returned for the same photograph.
+- Describe only what can actually be seen.
+- If nothing safety-relevant can be established visually, return findings as an empty array.
+
+The system will determine WSHC check IDs, WSHC URLs and detailed inspection checklists separately using Vectorize and D1. Do not invent those values.
+`.trim();
 
   let response: any;
   let mode = "json_schema";
+  let firstError: unknown = null;
 
   try {
     response = await callVisionAI(
       env,
       imageData,
       prompt,
-      true
+      AI_FINDINGS_JSON_SCHEMA
     );
-  } catch (firstError) {
-    /*
-     * Workers AI documents that JSON Schema can fail in extreme cases.
-     * Retry once with simpler JSON Object mode rather than falling back
-     * immediately to arbitrary natural-language output.
-     */
-    mode = "json_object_fallback";
+  } catch (error) {
+    firstError = error;
+  }
+
+  /*
+   * If the full schema is rejected by the provider, retry with a deliberately
+   * simpler JSON Schema. We DO NOT fall back to json_object mode because that
+   * allows the vision model to return free-form Markdown/prose, which was the
+   * source of the previous failures.
+   */
+  if (!response) {
+    mode = "json_schema_minimal_fallback";
 
     try {
       response = await callVisionAI(
         env,
         imageData,
-        prompt + "\\nReturn a JSON object with exactly one top-level property named findings.",
-        false
+        prompt,
+        MINIMAL_AI_FINDINGS_SCHEMA
       );
     } catch (secondError) {
       throw new Error(
-        `Workers AI structured JSON request failed. JSON Schema error: ${firstError instanceof Error ? firstError.message : String(firstError)}. JSON Object fallback error: ${secondError instanceof Error ? secondError.message : String(secondError)}`
+        `Workers AI JSON Schema request failed. Full schema: ${
+          firstError instanceof Error
+            ? firstError.message
+            : String(firstError)
+        }. Minimal schema: ${
+          secondError instanceof Error
+            ? secondError.message
+            : String(secondError)
+        }`
       );
     }
   }
@@ -575,12 +644,25 @@ async function runAI(
 
   if (!raw.trim()) {
     throw new Error(
-      `Workers AI returned no usable structured response. Response: ${JSON.stringify(response).substring(0, 3000)}`
+      `Workers AI returned no usable structured response. Response: ${JSON.stringify(response).substring(0, 5000)}`
+    );
+  }
+
+  // Verify that the returned content is actually our expected object before
+  // allowing the inspection pipeline to continue.
+  const parsed = extractJson(raw);
+
+  if (
+    !parsed ||
+    !Array.isArray(parsed.findings)
+  ) {
+    throw new Error(
+      `Workers AI returned non-structured output even though JSON Schema was requested. Raw AI output: ${raw.substring(0, 5000)}`
     );
   }
 
   return {
-    raw: raw.trim(),
+    raw: JSON.stringify(parsed),
     result: response,
     mode
   };
