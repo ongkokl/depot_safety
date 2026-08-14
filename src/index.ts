@@ -1898,135 +1898,95 @@ async function savePhoto(
   const photoId =
     crypto.randomUUID();
 
-
   const columns =
     await getTableColumns(
       db,
       "inspection_photos"
     );
 
-
-  if (
-    !columns.length
-  ) {
-
+  if (!columns.length) {
     throw new Error(
       "inspection_photos table not found."
     );
-
   }
 
+  /*
+  IMPORTANT:
+  object_key is NOT NULL in the current
+  inspection_photos table.
+
+  We therefore always generate one.
+  */
+
+  const objectKey =
+    `inspection/${inspectionId}/${photoId}-${fileName}`;
 
   const fields:
-    Record<
-      string,
-      unknown
-    > = {};
+    Record<string, unknown> = {};
 
-
-  if (
-    columns.includes("id")
-  ) {
-
+  if (columns.includes("id")) {
     fields.id =
       photoId;
-
   }
 
-
-  if (
-    columns.includes(
-      "inspection_id"
-    )
-  ) {
-
+  if (columns.includes("inspection_id")) {
     fields.inspection_id =
       inspectionId;
-
   }
 
-
-  if (
-    columns.includes(
-      "file_name"
-    )
-  ) {
-
+  if (columns.includes("file_name")) {
     fields.file_name =
       fileName;
-
   }
 
-
   if (
-    columns.includes(
-      "filename"
-    ) &&
-    !(
-      "file_name"
-      in fields
-    )
+    columns.includes("filename") &&
+    !("file_name" in fields)
   ) {
-
     fields.filename =
       fileName;
-
   }
 
-
-  if (
-    columns.includes(
-      "content_type"
-    )
-  ) {
-
+  if (columns.includes("content_type")) {
     fields.content_type =
       contentType;
-
   }
 
-
   if (
-    columns.includes(
-      "mime_type"
-    ) &&
-    !(
-      "content_type"
-      in fields
-    )
+    columns.includes("mime_type") &&
+    !("content_type" in fields)
   ) {
-
     fields.mime_type =
       contentType;
-
   }
 
+  /*
+  REQUIRED BY YOUR D1 SCHEMA
+  */
 
-  if (
-    columns.includes(
-      "created_at"
-    )
-  ) {
+  if (columns.includes("object_key")) {
+    fields.object_key =
+      objectKey;
+  }
 
+  if (columns.includes("created_at")) {
     fields.created_at =
       nowISO();
-
   }
 
-
   const names =
-    Object.keys(
-      fields
-    );
+    Object.keys(fields);
 
+  if (!names.length) {
+    throw new Error(
+      "No usable columns were found in inspection_photos."
+    );
+  }
 
   const placeholders =
     names
-      .map(
-        () => "?"
-      )
+      .map(() => "?")
       .join(", ");
-
 
   await db
     .prepare(
@@ -2039,15 +1999,12 @@ async function savePhoto(
     )
     .bind(
       ...names.map(
-        name =>
-          fields[name]
+        name => fields[name]
       )
     )
     .run();
 
-
   return photoId;
-
 }
 
 
