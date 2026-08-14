@@ -8,7 +8,9 @@ export interface Env {
 const MODEL =
   "@cf/meta/llama-3.2-11b-vision-instruct";
 
-const MAX_IMAGE_SIZE = 12 * 1024 * 1024;
+const MAX_IMAGE_SIZE =
+  12 * 1024 * 1024;
+
 const MAX_FINDINGS = 8;
 
 type Status =
@@ -70,12 +72,16 @@ function jsonResponse(
       headers: {
         "Content-Type":
           "application/json; charset=utf-8",
+
         "Cache-Control":
           "no-store",
+
         "Access-Control-Allow-Origin":
           "*",
+
         "Access-Control-Allow-Methods":
           "GET, POST, OPTIONS",
+
         "Access-Control-Allow-Headers":
           "Content-Type",
       },
@@ -84,16 +90,17 @@ function jsonResponse(
 }
 
 function textResponse(
-  value: string,
+  text: string,
   status = 200
 ): Response {
   return new Response(
-    value,
+    text,
     {
       status,
       headers: {
         "Content-Type":
           "text/plain; charset=utf-8",
+
         "Access-Control-Allow-Origin":
           "*",
       },
@@ -107,6 +114,10 @@ function textResponse(
 
 function uuid(): string {
   return crypto.randomUUID();
+}
+
+function nowISO(): string {
+  return new Date().toISOString();
 }
 
 function clean(
@@ -126,8 +137,19 @@ function clean(
     .substring(0, max);
 }
 
-function nowISO(): string {
-  return new Date().toISOString();
+function cleanMarkdown(
+  value: unknown,
+  max = 2000
+): string {
+  return clean(
+    value,
+    max
+  )
+    .replace(/\*\*/g, "")
+    .replace(/__/g, "")
+    .replace(/^#+\s*/g, "")
+    .replace(/^[-*•]\s*/g, "")
+    .trim();
 }
 
 function inspectionNumber(): string {
@@ -165,23 +187,33 @@ function normalizeContentType(
       .split(";")[0]
       .trim();
 
-  if (type === "image/png") {
+  if (
+    type === "image/png"
+  ) {
     return "image/png";
   }
 
-  if (type === "image/webp") {
+  if (
+    type === "image/webp"
+  ) {
     return "image/webp";
   }
 
-  if (type === "image/gif") {
+  if (
+    type === "image/gif"
+  ) {
     return "image/gif";
   }
 
-  if (type === "image/heic") {
+  if (
+    type === "image/heic"
+  ) {
     return "image/heic";
   }
 
-  if (type === "image/heif") {
+  if (
+    type === "image/heif"
+  ) {
     return "image/heif";
   }
 
@@ -215,7 +247,7 @@ function extension(
 function safeFileName(
   value: string
 ): string {
-  const name =
+  const result =
     value
       .replace(
         /[^a-zA-Z0-9._-]/g,
@@ -224,7 +256,7 @@ function safeFileName(
       .substring(0, 150);
 
   return (
-    name ||
+    result ||
     "inspection-photo.jpg"
   );
 }
@@ -278,23 +310,23 @@ function imageDataUrl(
 }
 
 /* =========================================================
-   REQUEST PARSING
+   REQUEST PARSER
    ========================================================= */
 
 async function parseRequest(
   request: Request
 ): Promise<ParsedRequest> {
-  const requestContentType =
+  const contentType =
     request.headers.get(
       "content-type"
     ) || "";
 
   /* -------------------------------------------------------
-     MULTIPART FORM
+     MULTIPART FORM DATA
      ------------------------------------------------------- */
 
   if (
-    requestContentType
+    contentType
       .toLowerCase()
       .includes(
         "multipart/form-data"
@@ -306,7 +338,7 @@ async function parseRequest(
     let file: File | null =
       null;
 
-    const names = [
+    const possibleNames = [
       "image",
       "photo",
       "file",
@@ -314,7 +346,8 @@ async function parseRequest(
     ];
 
     for (
-      const name of names
+      const name of
+        possibleNames
     ) {
       const value =
         form.get(name);
@@ -352,7 +385,9 @@ async function parseRequest(
     const bytes =
       await file.arrayBuffer();
 
-    if (!bytes.byteLength) {
+    if (
+      !bytes.byteLength
+    ) {
       throw new Error(
         "The uploaded image is empty."
       );
@@ -363,17 +398,19 @@ async function parseRequest(
       MAX_IMAGE_SIZE
     ) {
       throw new Error(
-        "The image is larger than 12 MB."
+        "The uploaded image is larger than 12 MB."
       );
     }
 
     return {
       photo: {
         bytes,
+
         contentType:
           normalizeContentType(
             file.type
           ),
+
         fileName:
           safeFileName(
             file.name ||
@@ -387,7 +424,8 @@ async function parseRequest(
             "location"
           ),
           200
-        ),
+        ) ||
+        "Unspecified",
 
       inspector:
         clean(
@@ -395,12 +433,13 @@ async function parseRequest(
             "inspector"
           ),
           200
-        ),
+        ) ||
+        "Unspecified",
     };
   }
 
   /* -------------------------------------------------------
-     JSON REQUEST
+     JSON
      ------------------------------------------------------- */
 
   let body: any;
@@ -414,23 +453,23 @@ async function parseRequest(
     );
   }
 
-  const imageValue =
+  let base64 =
     body?.image ||
     body?.imageBase64 ||
     body?.photo;
 
   if (
-    typeof imageValue !==
+    typeof base64 !==
       "string" ||
-    !imageValue.trim()
+    !base64.trim()
   ) {
     throw new Error(
       "No image was supplied."
     );
   }
 
-  let base64 =
-    imageValue.trim();
+  base64 =
+    base64.trim();
 
   let imageType =
     normalizeContentType(
@@ -439,19 +478,19 @@ async function parseRequest(
         "image/jpeg"
     );
 
-  const dataUrlMatch =
+  const match =
     base64.match(
       /^data:(image\/[^;]+);base64,(.+)$/s
     );
 
-  if (dataUrlMatch) {
+  if (match) {
     imageType =
       normalizeContentType(
-        dataUrlMatch[1]
+        match[1]
       );
 
     base64 =
-      dataUrlMatch[2];
+      match[2];
   }
 
   let binary: string;
@@ -479,7 +518,9 @@ async function parseRequest(
       binary.charCodeAt(i);
   }
 
-  if (!bytes.byteLength) {
+  if (
+    !bytes.byteLength
+  ) {
     throw new Error(
       "The image is empty."
     );
@@ -498,8 +539,10 @@ async function parseRequest(
     photo: {
       bytes:
         bytes.buffer,
+
       contentType:
         imageType,
+
       fileName:
         safeFileName(
           body?.fileName ||
@@ -513,34 +556,36 @@ async function parseRequest(
       clean(
         body?.location,
         200
-      ),
+      ) ||
+      "Unspecified",
 
     inspector:
       clean(
         body?.inspector,
         200
-      ),
+      ) ||
+      "Unspecified",
   };
 }
 
 /* =========================================================
-   D1 SCHEMA
+   D1 TABLE HELPERS
    ========================================================= */
+
+const ALLOWED_TABLES = [
+  "inspections",
+  "inspection_photos",
+  "inspection_items",
+  "safety_checks",
+  "corrective_actions",
+];
 
 async function getTableColumns(
   db: D1Database,
   table: string
 ): Promise<Set<string>> {
-  const allowedTables = [
-    "inspections",
-    "inspection_photos",
-    "findings",
-    "safety_checks",
-    "corrective_actions",
-  ];
-
   if (
-    !allowedTables.includes(
+    !ALLOWED_TABLES.includes(
       table
     )
   ) {
@@ -577,16 +622,8 @@ function buildInsert(
   sql: string;
   params: unknown[];
 } {
-  const allowedTables = [
-    "inspections",
-    "inspection_photos",
-    "findings",
-    "safety_checks",
-    "corrective_actions",
-  ];
-
   if (
-    !allowedTables.includes(
+    !ALLOWED_TABLES.includes(
       table
     )
   ) {
@@ -602,9 +639,11 @@ function buildInsert(
           columns.has(column)
       );
 
-  if (!selected.length) {
+  if (
+    !selected.length
+  ) {
     throw new Error(
-      `No matching columns found for table ${table}.`
+      `No matching columns found in ${table}.`
     );
   }
 
@@ -631,6 +670,7 @@ function buildInsert(
       (${names.join(", ")})
       VALUES (${placeholders.join(", ")})
     `,
+
     params,
   };
 }
@@ -664,7 +704,9 @@ async function loadSafetyChecks(
         !columns.has(column)
     );
 
-  if (missing.length) {
+  if (
+    missing.length
+  ) {
     throw new Error(
       `safety_checks is missing columns: ${missing.join(
         ", "
@@ -687,7 +729,7 @@ async function loadSafetyChecks(
         FROM safety_checks
         WHERE active = 1
         ORDER BY category, id
-        LIMIT 30
+        LIMIT 40
         `
       )
       .all<SafetyCheck>();
@@ -701,118 +743,121 @@ async function loadSafetyChecks(
    AI PROMPT
    ========================================================= */
 
-function safetyCheckText(
-  checks: SafetyCheck[]
-): string {
-  if (!checks.length) {
-    return `
-No active safety checks are currently available.
-Do not invent WSH source information.
-`;
-  }
-
-  return checks
-    .map(
-      (check) =>
-        `
-CHECK ID: ${check.id}
-CATEGORY: ${check.category}
-QUESTION: ${clean(
-          check.check_question,
-          350
-        )}
-GUIDANCE: ${clean(
-          check.guidance,
-          500
-        )}
-KEYWORDS: ${clean(
-          check.keywords,
-          200
-        )}
-`
-    )
-    .join("\n");
-}
-
 function buildPrompt(
   checks: SafetyCheck[]
 ): string {
+  const available =
+    checks
+      .map(
+        (check) =>
+          `
+CHECK ID: ${check.id}
+CATEGORY: ${check.category}
+QUESTION: ${clean(
+            check.check_question,
+            350
+          )}
+GUIDANCE: ${clean(
+            check.guidance,
+            500
+          )}
+KEYWORDS: ${clean(
+            check.keywords,
+            250
+          )}
+SOURCE: ${clean(
+            check.source_title,
+            250
+          )}
+URL: ${clean(
+            check.source_url,
+            500
+          )}
+`
+      )
+      .join("\n");
+
   return `
 You are a workplace safety inspection assistant for a Singapore shipping/container depot.
 
-Analyse the attached photograph.
+Analyse ONLY what is visibly supported by the photograph.
 
-Identify ONLY safety conditions that can reasonably be determined from visible evidence.
+IMPORTANT:
 
-IMPORTANT RULES:
+Do not invent hazards.
 
-1. Do not invent hazards.
-2. Do not invent activities.
-3. Do not assume every safety category applies.
-4. Do not automatically create PPE, housekeeping, work-at-height, lifting or vehicle findings.
-5. Only assess a category when there is visible evidence relevant to it.
-6. A crane in the background does not prove lifting is taking place.
-7. Containers in the background do not automatically indicate a storage hazard.
-8. If PPE is clearly visible, PPE may be assessed.
-9. If the work area/floor is visible, housekeeping may be assessed.
-10. If an elevated work area, ladder, scaffold, open edge or guardrail is visible, work-at-height may be assessed.
-11. If a suspended load, lifting operation, rigging or crane activity is clearly visible, lifting may be assessed.
-12. If vehicles and pedestrian routes are clearly visible, vehicular safety may be assessed.
-13. If electrical equipment, exposed wiring or damaged cables are visible, electrical safety may be assessed.
-14. If fire equipment or fire hazards are visible, fire safety may be assessed.
-15. If materials are visibly stored or stacked, storage may be assessed.
+Do not assume that every safety category applies.
+
+A safety category should become a finding ONLY when there is visible evidence relevant to that category.
+
+For example:
+
+- If a worker and PPE are clearly visible, PPE can be assessed.
+- If the floor/work area is visible, housekeeping can be assessed.
+- If vehicles, traffic lanes or pedestrian routes are clearly visible, vehicular safety can be assessed.
+- If an elevated work area, ladder, scaffold, open edge or fall exposure is clearly visible, work-at-height can be assessed.
+- If a crane, suspended load, rigging or actual lifting operation is clearly visible, lifting can be assessed.
+- If electrical equipment, exposed wiring or damaged cables are visible, electrical safety can be assessed.
+- If fire hazards or fire equipment are visible, fire safety can be assessed.
+- If materials are visibly stored or stacked, storage can be assessed.
+
+VERY IMPORTANT:
+
+DO NOT create a finding saying:
+"No visible work at height"
+"No visible lifting"
+"No visible electrical equipment"
+"No visible fire hazards"
+"No visible storage"
+
+Those are NOT findings.
+
+If a category is not visibly relevant, simply OMIT that category.
+
+Do not create CHECK_REQUIRED merely because something is outside the photograph.
+
+CHECK_REQUIRED should only be used when there IS visible evidence of a relevant safety condition, but the photograph is insufficient to determine whether it is safe.
 
 STATUS:
 
-PASS
-The visible evidence supports that the condition appears satisfactory.
+PASS = visible condition appears satisfactory.
 
-FAIL
-There is clear visible evidence of an unsafe condition.
+FAIL = visible unsafe condition is identified.
 
-CHECK_REQUIRED
-The topic is relevant but cannot be confidently determined from the photograph.
-
-Do NOT create CHECK_REQUIRED findings merely because a category cannot be seen.
+CHECK_REQUIRED = visible condition exists but cannot confidently be judged.
 
 RISK:
 
-LOW
-Satisfactory condition or minor issue.
+LOW = satisfactory or minor concern.
 
-MEDIUM
-Potential safety concern requiring verification or correction.
+MEDIUM = potential safety concern.
 
-HIGH
-Clearly visible potentially serious safety hazard.
+HIGH = clearly serious safety concern.
 
 CONFIDENCE:
-Return a value between 0 and 1.
+Use 0 to 1.
 
-Do not use 1.0 unless the visual evidence is exceptionally clear.
+Return only actual visible findings.
 
-Return maximum 8 findings.
+Maximum 8 findings.
 
-Use exactly this format for every finding:
+Use exactly this structure:
 
-CATEGORY: PPE
-TITLE: Visible PPE appears appropriate
-OBSERVATION: The worker is visibly wearing a hard hat and high-visibility vest.
-STATUS: PASS
-RISK: LOW
-CONFIDENCE: 0.88
-CHECK_ID: ppe-001
+**Category:** PPE
+**Title:** Visible PPE appears appropriate
+**Observation:** The worker is visibly wearing a hard hat and high-visibility vest.
+**Status:** PASS
+**Risk:** LOW
+**Confidence:** 0.88
+**Check ID:** ppe-001
 
-If a suitable check cannot be identified, use:
-CHECK_ID: NONE
+Then repeat for other relevant visible categories.
 
-Only include categories relevant to the visible photograph.
+Do not include explanations before or after the findings.
 
 AVAILABLE WSH CHECKS:
 
-${safetyCheckText(
-  checks
-)}
+${available}
 `.trim();
 }
 
@@ -830,23 +875,15 @@ async function runAI(
   result: any;
 }> {
   const prompt =
-    buildPrompt(checks);
+    buildPrompt(
+      checks
+    );
 
   /*
    * IMPORTANT:
    *
-   * The function parameter is called "image".
-   * Therefore this variable MUST NOT also be called "image".
-   *
-   * Previous build error:
-   *
-   * The symbol "image" has already been declared
-   *
-   * was caused by:
-   *
-   * const image = imageDataUrl(...)
-   *
-   * This version uses imageData instead.
+   * Keep the function parameter named "image".
+   * Do NOT declare another const named "image".
    */
 
   const imageData =
@@ -858,13 +895,6 @@ async function runAI(
   let response: any;
 
   try {
-    /*
-     * Do not use response_format / JSON schema here.
-     *
-     * We deliberately allow the model to return normal text
-     * and parse the response ourselves.
-     */
-
     response =
       await env.AI.run(
         MODEL,
@@ -873,8 +903,9 @@ async function runAI(
             {
               role: "system",
               content:
-                "You are a careful workplace safety visual inspection assistant.",
+                "You are a careful Singapore workplace safety visual inspection assistant. Only report visible evidence.",
             },
+
             {
               role: "user",
               content:
@@ -882,93 +913,29 @@ async function runAI(
             },
           ],
 
-          image: imageData,
+          image:
+            imageData,
 
-          max_tokens: 900,
+          max_tokens:
+            900,
 
-          temperature: 0.1,
+          temperature:
+            0.05,
 
-          top_p: 0.8,
+          top_p:
+            0.8,
         } as any
       );
   } catch (error) {
-    const detail =
-      error instanceof Error
-        ? error.message
-        : String(error);
-
-    // Best-effort R2 cleanup.
-    if (
-      r2Uploaded &&
-      objectKey
-    ) {
-      try {
-        await env.PHOTOS.delete(
-          objectKey
-        );
-      } catch {
-        // Ignore cleanup failure.
-      }
-    }
-
-    // Best-effort inspection status update.
-    if (inspectionId) {
-      try {
-        await updateInspection(
-          env,
-          inspectionId,
-          "CHECK_REQUIRED"
-        );
-      } catch {
-        // Ignore secondary error.
-      }
-    }
-
-    // IMPORTANT:
-    // Put the actual diagnostic information
-    // into the main "error" property so that even
-    // the current index.html will display it.
-    const diagnostic =
-      [
-        "AI analysis failed.",
-        `Stage: ${stage}`,
-        `Detail: ${detail}`,
-        inspectionId
-          ? `Inspection ID: ${inspectionId}`
-          : "",
-        photoId
-          ? `Photo ID: ${photoId}`
-          : "",
-        objectKey
-          ? `R2 object: ${objectKey}`
-          : "",
-      ]
-        .filter(Boolean)
-        .join("\n");
-
-    return jsonResponse(
-      {
-        ok: false,
-
-        error:
-          diagnostic,
-
-        stage,
-
-        detail,
-
-        inspectionId:
-          inspectionId || null,
-
-        photoId:
-          photoId || null,
-
-        objectKey:
-          objectKey || null,
-      },
-      500
+    throw new Error(
+      `Workers AI request failed: ${
+        error instanceof Error
+          ? error.message
+          : String(error)
+      }`
     );
   }
+
   const raw =
     typeof response ===
     "string"
@@ -981,75 +948,50 @@ async function runAI(
       ? response.result
       : "";
 
-  if (!raw) {
+  if (
+    !raw.trim()
+  ) {
     throw new Error(
-      `Workers AI returned no text response. Raw response: ${JSON.stringify(
+      `Workers AI returned no text. Response: ${JSON.stringify(
         response
       ).substring(0, 3000)}`
     );
   }
 
   return {
-    raw,
-    result: response,
+    raw:
+      raw.trim(),
+
+    result:
+      response,
   };
 }
 
 /* =========================================================
-   AI TEXT PARSER
+   AI FIELD PARSING
    ========================================================= */
 
-function splitFindingBlocks(
-  raw: string
-): string[] {
-  const text =
-    raw
-      .replace(
-        /\r/g,
-        ""
-      )
-      .trim();
-
-  if (!text) {
-    return [];
-  }
-
-  const blocks =
-    text.split(
-      /(?=^\s*(?:\*\*)?\s*CATEGORY\s*[:\-])/gim
-    );
-
-  return blocks
-    .map(
-      (block) =>
-        block.trim()
-    )
-    .filter(
-      (block) =>
-        block.length > 20
-    );
-}
-
-function field(
+function extractField(
   block: string,
   names: string[]
 ): string {
   for (
     const name of names
   ) {
-    const regex =
+    const pattern =
       new RegExp(
-        `(?:^|\\n)\\s*(?:\\*\\*)?${name}(?:\\*\\*)?\\s*[:\\-]\\s*(.*)`,
-        "im"
+        `(?:^|\\n)\\s*(?:\\*\\*)?${name}(?:\\*\\*)?\\s*[:\\-]\\s*(.*?)(?=\\n\\s*(?:\\*\\*)?(?:Category|Title|Observation|Status|Risk|Confidence|Check ID)(?:\\*\\*)?\\s*[:\\-]|$)`,
+        "is"
       );
 
     const match =
-      block.match(regex);
+      block.match(
+        pattern
+      );
 
     if (match) {
-      return clean(
-        match[1],
-        1200
+      return cleanMarkdown(
+        match[1]
       );
     }
   }
@@ -1057,139 +999,144 @@ function field(
   return "";
 }
 
-function inferStatus(
-  observation: string,
-  explicit: string
-): Status {
-  if (explicit) {
-    const value =
-      explicit.toUpperCase();
-
-    if (
-      value.includes(
-        "FAIL"
-      ) ||
-      value.includes(
-        "UNSAFE"
-      ) ||
-      value.includes(
-        "NON_COMPLIANT"
-      )
-    ) {
-      return "FAIL";
-    }
-
-    if (
-      value.includes(
-        "PASS"
-      ) ||
-      value.includes(
-        "SAFE"
-      ) ||
-      value.includes(
-        "COMPLIANT"
-      )
-    ) {
-      return "PASS";
-    }
-
-    if (
-      value.includes(
-        "CHECK"
-      )
-    ) {
-      return "CHECK_REQUIRED";
-    }
+function parseConfidence(
+  value: string
+): number {
+  if (!value) {
+    return 0.6;
   }
 
+  const match =
+    value.match(
+      /(\d+(?:\.\d+)?)/
+    );
+
+  if (!match) {
+    return 0.6;
+  }
+
+  let number =
+    Number(
+      match[1]
+    );
+
+  if (
+    !Number.isFinite(
+      number
+    )
+  ) {
+    return 0.6;
+  }
+
+  if (
+    number > 1
+  ) {
+    number /=
+      100;
+  }
+
+  return Math.round(
+    Math.max(
+      0,
+      Math.min(
+        1,
+        number
+      )
+    ) * 100
+  ) / 100;
+}
+
+function normalizeStatus(
+  value: string,
+  observation: string
+): Status {
   const text =
+    cleanMarkdown(
+      value
+    ).toUpperCase();
+
+  if (
+    text.includes(
+      "FAIL"
+    )
+  ) {
+    return "FAIL";
+  }
+
+  if (
+    text.includes(
+      "PASS"
+    )
+  ) {
+    return "PASS";
+  }
+
+  if (
+    text.includes(
+      "CHECK"
+    )
+  ) {
+    return "CHECK_REQUIRED";
+  }
+
+  const lower =
     observation.toLowerCase();
 
-  const failIndicators = [
-    "no hard hat",
-    "without hard hat",
-    "missing ppe",
-    "no safety vest",
-    "not wearing",
+  const failureWords = [
     "unsafe",
+    "hazard",
     "spill",
-    "oil spill",
-    "blocked",
     "obstructed",
+    "blocked",
+    "missing",
+    "damaged",
+    "exposed",
     "unguarded",
-    "missing guardrail",
-    "open edge",
-    "exposed wire",
-    "damaged cable",
-    "suspended load above",
   ];
 
-  for (
-    const indicator of
-      failIndicators
+  if (
+    failureWords.some(
+      (word) =>
+        lower.includes(
+          word
+        )
+    )
   ) {
-    if (
-      text.includes(
-        indicator
-      )
-    ) {
-      return "FAIL";
-    }
-  }
-
-  const passIndicators = [
-    "appears clean",
-    "clean and free",
-    "free of clutter",
-    "no visible spill",
-    "wearing a hard hat",
-    "wearing hard hat",
-    "wearing a safety vest",
-    "wearing high visibility",
-    "appropriate ppe",
-    "clearly segregated",
-    "properly stored",
-    "appears safe",
-    "appears satisfactory",
-  ];
-
-  for (
-    const indicator of
-      passIndicators
-  ) {
-    if (
-      text.includes(
-        indicator
-      )
-    ) {
-      return "PASS";
-    }
+    return "FAIL";
   }
 
   return "CHECK_REQUIRED";
 }
 
-function inferRisk(
-  status: Status,
-  explicit: string
+function normalizeRisk(
+  value: string,
+  status: Status
 ): Risk {
-  const value =
-    explicit.toUpperCase();
+  const text =
+    cleanMarkdown(
+      value
+    ).toUpperCase();
 
   if (
-    value.includes("HIGH")
+    text.includes(
+      "HIGH"
+    )
   ) {
     return "HIGH";
   }
 
   if (
-    value.includes("MEDIUM")
+    text.includes(
+      "MEDIUM"
+    )
   ) {
     return "MEDIUM";
   }
 
   if (
-    value.includes("LOW")
+    text.includes(
+      "LOW"
+    )
   ) {
     return "LOW";
   }
@@ -1209,7 +1156,148 @@ function inferRisk(
   return "MEDIUM";
 }
 
-function parseTextFindings(
+/* =========================================================
+   IGNORE NON-VISIBLE CATEGORIES
+   ========================================================= */
+
+function isNegativeVisibilityFinding(
+  category: string,
+  title: string,
+  observation: string
+): boolean {
+  const text =
+    `${category} ${title} ${observation}`
+      .toLowerCase()
+      .replace(
+        /\s+/g,
+        " "
+      );
+
+  const negativePatterns = [
+    "no visible",
+    "not visible",
+    "there is no visible",
+    "no evidence",
+    "cannot be determined",
+    "not observed",
+    "not apparent",
+
+    "no visible work at height",
+    "no visible lifting",
+    "no visible lifting operation",
+    "no visible electrical",
+    "no visible fire",
+    "no visible storage",
+
+    "no work at height",
+    "no lifting operation",
+    "no electrical equipment",
+    "no fire hazards",
+    "no storage hazards",
+  ];
+
+  return negativePatterns.some(
+    (pattern) =>
+      text.includes(
+        pattern
+      )
+  );
+}
+
+/* =========================================================
+   SPLIT STRUCTURED AI RESPONSE
+   ========================================================= */
+
+function splitStructuredBlocks(
+  raw: string
+): string[] {
+  const text =
+    raw
+      .replace(
+        /\r/g,
+        ""
+      )
+      .trim();
+
+  if (!text) {
+    return [];
+  }
+
+  /*
+   * Primary format:
+   *
+   * **Category:** PPE
+   * **Title:** ...
+   *
+   * **Category:** Housekeeping
+   */
+
+  const matches =
+    text.match(
+      /(?:^|\n)\s*(?:\*\*)?Category(?:\*\*)?\s*:/gi
+    );
+
+  if (
+    matches &&
+    matches.length
+  ) {
+    const positions: number[] =
+      [];
+
+    const regex =
+      /(?:^|\n)\s*(?:\*\*)?Category(?:\*\*)?\s*:/gi;
+
+    let match:
+      RegExpExecArray | null;
+
+    while (
+      (match =
+        regex.exec(text)) !==
+      null
+    ) {
+      positions.push(
+        match.index
+      );
+    }
+
+    const blocks: string[] =
+      [];
+
+    for (
+      let i = 0;
+      i < positions.length;
+      i++
+    ) {
+      const start =
+        positions[i];
+
+      const end =
+        i + 1 <
+        positions.length
+          ? positions[
+              i + 1
+            ]
+          : text.length;
+
+      blocks.push(
+        text.substring(
+          start,
+          end
+        ).trim()
+      );
+    }
+
+    return blocks;
+  }
+
+  return [];
+}
+
+/* =========================================================
+   MARKDOWN BULLET PARSER
+   ========================================================= */
+
+function parseBulletFindings(
   raw: string
 ): Array<{
   category: string;
@@ -1220,12 +1308,7 @@ function parseTextFindings(
   confidence: number;
   checkId: string;
 }> {
-  const blocks =
-    splitFindingBlocks(
-      raw
-    );
-
-  const findings: Array<{
+  const results: Array<{
     category: string;
     title: string;
     observation: string;
@@ -1235,146 +1318,75 @@ function parseTextFindings(
     checkId: string;
   }> = [];
 
+  const lines =
+    raw
+      .replace(
+        /\r/g,
+        ""
+      )
+      .split("\n")
+      .map(
+        (line) =>
+          line.trim()
+      );
+
   for (
-    const block of blocks
+    const line of lines
   ) {
+    const match =
+      line.match(
+        /^(?:[-*•]\s*)?\*\*(.+?)\*\*\s*:\s*(.+?)\s+\*\*STATUS:\s*(PASS|FAIL|CHECK_REQUIRED)\*\*\s+\*\*RISK:\s*(LOW|MEDIUM|HIGH)\*\*\s+\*\*CONFIDENCE:\s*([0-9.]+)\*\*/i
+      );
+
+    if (!match) {
+      continue;
+    }
+
     const category =
-      clean(
-        field(
-          block,
-          [
-            "CATEGORY",
-          ]
-        ),
-        100
+      cleanMarkdown(
+        match[1]
       );
 
-    const title =
-      clean(
-        field(
-          block,
-          [
-            "TITLE",
-          ]
-        ),
-        250
+    const content =
+      cleanMarkdown(
+        match[2]
       );
 
-    const observation =
-      clean(
-        field(
-          block,
-          [
-            "OBSERVATION",
-            "DESCRIPTION",
-          ]
-        ),
-        1200
+    const status =
+      normalizeStatus(
+        match[3],
+        content
       );
 
-    const statusText =
-      field(
-        block,
-        [
-          "STATUS",
-          "RESULT",
-        ]
+    const risk =
+      normalizeRisk(
+        match[4],
+        status
       );
 
-    const riskText =
-      field(
-        block,
-        [
-          "RISK",
-          "RISK_LEVEL",
-          "RISK LEVEL",
-        ]
-      );
-
-    const confidenceText =
-      field(
-        block,
-        [
-          "CONFIDENCE",
-        ]
-      );
-
-    const checkId =
-      field(
-        block,
-        [
-          "CHECK_ID",
-          "CHECK ID",
-        ]
+    const confidence =
+      parseConfidence(
+        match[5]
       );
 
     if (
-      !category &&
-      !observation
+      isNegativeVisibilityFinding(
+        category,
+        category,
+        content
+      )
     ) {
       continue;
     }
 
-    const finalObservation =
-      observation ||
-      title;
-
-    let confidence =
-      Number(
-        confidenceText
-          .replace(
-            "%",
-            ""
-          )
-      );
-
-    if (
-      !Number.isFinite(
-        confidence
-      )
-    ) {
-      confidence = 0.6;
-    }
-
-    if (
-      confidence > 1
-    ) {
-      confidence /=
-        100;
-    }
-
-    confidence =
-      Math.max(
-        0,
-        Math.min(
-          1,
-          confidence
-        )
-      );
-
-    const status =
-      inferStatus(
-        finalObservation,
-        statusText
-      );
-
-    const risk =
-      inferRisk(
-        status,
-        riskText
-      );
-
-    findings.push({
-      category:
-        category ||
-        "Other",
+    results.push({
+      category,
 
       title:
-        title ||
-        "Safety observation",
+        `${category} observation`,
 
       observation:
-        finalObservation,
+        content,
 
       status,
 
@@ -1383,14 +1395,187 @@ function parseTextFindings(
       confidence,
 
       checkId:
-        checkId ===
-          "NONE"
-          ? ""
-          : checkId,
+        "",
+    });
+  }
+
+  return results;
+}
+
+/* =========================================================
+   PARSE AI RESPONSE
+   ========================================================= */
+
+function parseAIResponse(
+  raw: string
+): Array<{
+  category: string;
+  title: string;
+  observation: string;
+  status: Status;
+  risk: Risk;
+  confidence: number;
+  checkId: string;
+}> {
+  const results: Array<{
+    category: string;
+    title: string;
+    observation: string;
+    status: Status;
+    risk: Risk;
+    confidence: number;
+    checkId: string;
+  }> = [];
+
+  /*
+   * First try the structured format.
+   */
+
+  const blocks =
+    splitStructuredBlocks(
+      raw
+    );
+
+  for (
+    const block of blocks
+  ) {
+    const category =
+      extractField(
+        block,
+        [
+          "Category",
+        ]
+      );
+
+    const title =
+      extractField(
+        block,
+        [
+          "Title",
+        ]
+      );
+
+    const observation =
+      extractField(
+        block,
+        [
+          "Observation",
+        ]
+      );
+
+    const statusText =
+      extractField(
+        block,
+        [
+          "Status",
+        ]
+      );
+
+    const riskText =
+      extractField(
+        block,
+        [
+          "Risk",
+        ]
+      );
+
+    const confidenceText =
+      extractField(
+        block,
+        [
+          "Confidence",
+        ]
+      );
+
+    const checkId =
+      extractField(
+        block,
+        [
+          "Check ID",
+          "CheckID",
+        ]
+      );
+
+    if (
+      !category
+    ) {
+      continue;
+    }
+
+    const finalTitle =
+      title ||
+      `${category} observation`;
+
+    const finalObservation =
+      observation ||
+      finalTitle;
+
+    /*
+     * Ignore categories that are explicitly
+     * saying the subject is not visible.
+     */
+
+    if (
+      isNegativeVisibilityFinding(
+        category,
+        finalTitle,
+        finalObservation
+      )
+    ) {
+      continue;
+    }
+
+    const status =
+      normalizeStatus(
+        statusText,
+        finalObservation
+      );
+
+    const risk =
+      normalizeRisk(
+        riskText,
+        status
+      );
+
+    const confidence =
+      parseConfidence(
+        confidenceText
+      );
+
+    results.push({
+      category:
+        cleanMarkdown(
+          category,
+          100
+        ),
+
+      title:
+        cleanMarkdown(
+          finalTitle,
+          250
+        ),
+
+      observation:
+        cleanMarkdown(
+          finalObservation,
+          1200
+        ),
+
+      status,
+
+      risk,
+
+      confidence,
+
+      checkId:
+        cleanMarkdown(
+          checkId,
+          100
+        ),
     });
 
     if (
-      findings.length >=
+      results.length >=
       MAX_FINDINGS
     ) {
       break;
@@ -1398,171 +1583,121 @@ function parseTextFindings(
   }
 
   /*
-   * Fallback parser if the model ignored
-   * the requested field structure.
+   * Second parser for compact bullet format.
    */
 
   if (
-    findings.length ===
+    results.length ===
     0
   ) {
-    const lines =
+    return parseBulletFindings(
       raw
-        .split(/\n/)
-        .map(
-          (line) =>
-            line
-              .replace(
-                /^\s*[-*•]\s*/,
-                ""
-              )
-              .trim()
-        )
-        .filter(
-          (line) =>
-            line.length > 30
-        );
-
-    for (
-      const line of lines
-    ) {
-      const lower =
-        line.toLowerCase();
-
-      if (
-        lower.startsWith(
-          "the image"
-        ) ||
-        lower.startsWith(
-          "overall"
-        )
-      ) {
-        continue;
-      }
-
-      let category =
-        "Other";
-
-      if (
-        lower.includes(
-          "ppe"
-        ) ||
-        lower.includes(
-          "hard hat"
-        ) ||
-        lower.includes(
-          "safety vest"
-        )
-      ) {
-        category =
-          "PPE";
-      } else if (
-        lower.includes(
-          "housekeeping"
-        ) ||
-        lower.includes(
-          "clean"
-        ) ||
-        lower.includes(
-          "spill"
-        ) ||
-        lower.includes(
-          "clutter"
-        )
-      ) {
-        category =
-          "Housekeeping";
-      } else if (
-        lower.includes(
-          "work at height"
-        ) ||
-        lower.includes(
-          "guardrail"
-        ) ||
-        lower.includes(
-          "ladder"
-        ) ||
-        lower.includes(
-          "fall hazard"
-        )
-      ) {
-        category =
-          "Work at Height";
-      } else if (
-        lower.includes(
-          "lifting"
-        ) ||
-        lower.includes(
-          "suspended load"
-        ) ||
-        lower.includes(
-          "crane"
-        )
-      ) {
-        category =
-          "Lifting";
-      } else if (
-        lower.includes(
-          "vehicle"
-        ) ||
-        lower.includes(
-          "pedestrian"
-        ) ||
-        lower.includes(
-          "traffic"
-        )
-      ) {
-        category =
-          "Vehicular Safety";
-      }
-
-      const status =
-        inferStatus(
-          line,
-          ""
-        );
-
-      findings.push({
-        category,
-
-        title:
-          `${category} observation`,
-
-        observation:
-          line.substring(
-            0,
-            1200
-          ),
-
-        status,
-
-        risk:
-          inferRisk(
-            status,
-            ""
-          ),
-
-        confidence:
-          0.6,
-
-        checkId:
-          "",
-      });
-
-      if (
-        findings.length >=
-        MAX_FINDINGS
-      ) {
-        break;
-      }
-    }
+    );
   }
 
-  return findings;
+  return results;
 }
 
 /* =========================================================
-   MATCH SAFETY CHECK
+   CATEGORY NORMALIZATION
+   ========================================================= */
+
+function normalizeCategory(
+  category: string
+): string {
+  const value =
+    cleanMarkdown(
+      category,
+      100
+    )
+      .replace(
+        /\s+/g,
+        " "
+      )
+      .trim();
+
+  const lower =
+    value.toLowerCase();
+
+  if (
+    lower === "ppe" ||
+    lower.includes(
+      "personal protective"
+    )
+  ) {
+    return "PPE";
+  }
+
+  if (
+    lower.includes(
+      "housekeeping"
+    )
+  ) {
+    return "Housekeeping";
+  }
+
+  if (
+    lower.includes(
+      "vehicular"
+    ) ||
+    lower.includes(
+      "vehicle"
+    ) ||
+    lower.includes(
+      "traffic"
+    )
+  ) {
+    return "Vehicular Safety";
+  }
+
+  if (
+    lower.includes(
+      "work at height"
+    ) ||
+    lower.includes(
+      "working at height"
+    )
+  ) {
+    return "Work at Height";
+  }
+
+  if (
+    lower.includes(
+      "lifting"
+    )
+  ) {
+    return "Lifting";
+  }
+
+  if (
+    lower.includes(
+      "electrical"
+    )
+  ) {
+    return "Electrical Safety";
+  }
+
+  if (
+    lower.includes(
+      "fire"
+    )
+  ) {
+    return "Fire Safety";
+  }
+
+  if (
+    lower.includes(
+      "storage"
+    )
+  ) {
+    return "Storage";
+  }
+
+  return value;
+}
+
+/* =========================================================
+   CHECK MATCHING
    ========================================================= */
 
 function findCheck(
@@ -1574,6 +1709,10 @@ function findCheck(
   },
   checks: SafetyCheck[]
 ): SafetyCheck | null {
+  /*
+   * 1. Exact AI supplied ID.
+   */
+
   if (
     finding.checkId
   ) {
@@ -1589,27 +1728,37 @@ function findCheck(
     }
   }
 
-  const category =
-    finding.category
-      .toLowerCase();
+  /*
+   * 2. Exact normalized category.
+   */
 
-  const categoryChecks =
+  const category =
+    normalizeCategory(
+      finding.category
+    );
+
+  const categoryMatches =
     checks.filter(
       (check) =>
-        check.category
-          .toLowerCase()
-          === category
+        normalizeCategory(
+          check.category
+        ).toLowerCase() ===
+        category.toLowerCase()
     );
 
   if (
-    categoryChecks.length ===
+    categoryMatches.length ===
     1
   ) {
-    return categoryChecks[0];
+    return categoryMatches[0];
   }
 
+  /*
+   * 3. Keyword matching.
+   */
+
   const combined =
-    `${finding.category} ${finding.title} ${finding.observation}`
+    `${category} ${finding.title} ${finding.observation}`
       .toLowerCase();
 
   let best:
@@ -1621,18 +1770,25 @@ function findCheck(
 
   for (
     const check of
-      categoryChecks.length
-        ? categoryChecks
+      categoryMatches
+        .length
+        ? categoryMatches
         : checks
   ) {
-    const keywords =
+    const keywordText =
       clean(
         check.keywords,
         500
-      )
-        .toLowerCase()
+      ).toLowerCase();
+
+    const keywords =
+      keywordText
         .split(
-          /[,;\s|]+/
+          /[,;|]+/
+        )
+        .map(
+          (word) =>
+            word.trim()
         )
         .filter(
           (word) =>
@@ -1668,11 +1824,19 @@ function findCheck(
     }
   }
 
-  return (
-    best ||
-    categoryChecks[0] ||
-    null
-  );
+  /*
+   * IMPORTANT:
+   *
+   * Never return the first unrelated check.
+   */
+
+  if (
+    bestScore > 0
+  ) {
+    return best;
+  }
+
+  return null;
 }
 
 /* =========================================================
@@ -1700,8 +1864,55 @@ function normalizeFindings(
   for (
     const item of parsed
   ) {
+    const category =
+      normalizeCategory(
+        item.category
+      );
+
+    const title =
+      cleanMarkdown(
+        item.title,
+        250
+      );
+
+    const observation =
+      cleanMarkdown(
+        item.observation,
+        1200
+      );
+
+    /*
+     * Ignore empty entries.
+     */
+
+    if (
+      !category ||
+      !observation
+    ) {
+      continue;
+    }
+
+    /*
+     * Ignore invisible categories again
+     * as a safety net.
+     */
+
+    if (
+      isNegativeVisibilityFinding(
+        category,
+        title,
+        observation
+      )
+    ) {
+      continue;
+    }
+
+    /*
+     * Deduplicate.
+     */
+
     const key =
-      `${item.category}|${item.title}|${item.observation}`
+      `${category}|${title}|${observation}`
         .toLowerCase()
         .replace(
           /\s+/g,
@@ -1718,19 +1929,45 @@ function normalizeFindings(
 
     const check =
       findCheck(
-        item,
+        {
+          category,
+          title,
+          observation,
+          checkId:
+            item.checkId,
+        },
         checks
       );
 
+    let confidence =
+      Number(
+        item.confidence
+      );
+
+    if (
+      !Number.isFinite(
+        confidence
+      )
+    ) {
+      confidence =
+        0.6;
+    }
+
+    confidence =
+      Math.max(
+        0,
+        Math.min(
+          1,
+          confidence
+        )
+      );
+
     output.push({
-      category:
-        item.category,
+      category,
 
-      title:
-        item.title,
+      title,
 
-      observation:
-        item.observation,
+      observation,
 
       status:
         item.status,
@@ -1740,8 +1977,7 @@ function normalizeFindings(
 
       confidence:
         Math.round(
-          item.confidence *
-            100
+          confidence * 100
         ) / 100,
 
       check_id:
@@ -1815,7 +2051,7 @@ function buildSummary(
     findings.length ===
     0
   ) {
-    return "No structured safety findings were returned. Physical/site verification is required.";
+    return "No visible safety conditions were identified from the photograph.";
   }
 
   const pass =
@@ -1839,19 +2075,23 @@ function buildSummary(
         "CHECK_REQUIRED"
     ).length;
 
-  if (fail > 0) {
-    return `${fail} safety finding(s) require corrective attention. ${check} item(s) require verification and ${pass} item(s) were assessed as PASS.`;
+  if (
+    fail > 0
+  ) {
+    return `${fail} visible safety finding(s) require corrective attention. ${check} item(s) require verification and ${pass} item(s) passed.`;
   }
 
-  if (check > 0) {
-    return `${check} safety item(s) require site verification. ${pass} item(s) were assessed as PASS.`;
+  if (
+    check > 0
+  ) {
+    return `${check} visible safety item(s) require verification. ${pass} item(s) passed.`;
   }
 
   return `${pass} visible safety item(s) were assessed as PASS.`;
 }
 
 /* =========================================================
-   D1 INSERT INSPECTION
+   INSERT INSPECTION
    ========================================================= */
 
 async function insertInspection(
@@ -1873,14 +2113,19 @@ async function insertInspection(
     unknown
   > = {
     id,
+
     inspection_no:
       inspectionNo,
+
     location:
       location || null,
+
     inspector:
       inspector || null,
+
     created_at:
       createdAt,
+
     overall_result:
       "CHECK_REQUIRED",
   };
@@ -1893,7 +2138,9 @@ async function insertInspection(
     );
 
   await env.SAFETY_DB
-    .prepare(insert.sql)
+    .prepare(
+      insert.sql
+    )
     .bind(
       ...insert.params
     )
@@ -1901,7 +2148,7 @@ async function insertInspection(
 }
 
 /* =========================================================
-   D1 INSERT PHOTO
+   INSERT PHOTO
    ========================================================= */
 
 async function insertPhoto(
@@ -1918,6 +2165,10 @@ async function insertPhoto(
       env.SAFETY_DB,
       "inspection_photos"
     );
+
+  /*
+   * Your existing database requires object_key.
+   */
 
   if (
     !columns.has(
@@ -1960,7 +2211,9 @@ async function insertPhoto(
     );
 
   await env.SAFETY_DB
-    .prepare(insert.sql)
+    .prepare(
+      insert.sql
+    )
     .bind(
       ...insert.params
     )
@@ -1968,10 +2221,10 @@ async function insertPhoto(
 }
 
 /* =========================================================
-   D1 INSERT FINDINGS
+   INSERT INSPECTION ITEMS
    ========================================================= */
 
-async function insertFindings(
+async function insertInspectionItems(
   env: Env,
   inspectionId: string,
   photoId: string,
@@ -1984,10 +2237,32 @@ async function insertFindings(
     return;
   }
 
+  /*
+   * IMPORTANT:
+   *
+   * Your actual table schema provided earlier is:
+   *
+   * inspection_items
+   *
+   * id
+   * inspection_id
+   * photo_id
+   * category
+   * title
+   * observation
+   * status
+   * risk_level
+   * confidence
+   * check_id
+   * source_title
+   * source_url
+   * created_at
+   */
+
   const columns =
     await getTableColumns(
       env.SAFETY_DB,
-      "findings"
+      "inspection_items"
     );
 
   const statements =
@@ -2039,7 +2314,7 @@ async function insertFindings(
 
         const insert =
           buildInsert(
-            "findings",
+            "inspection_items",
             columns,
             values
           );
@@ -2060,7 +2335,7 @@ async function insertFindings(
 }
 
 /* =========================================================
-   D1 UPDATE INSPECTION
+   UPDATE INSPECTION
    ========================================================= */
 
 async function updateInspection(
@@ -2082,9 +2357,7 @@ async function updateInspection(
       "overall_result"
     )
   ) {
-    throw new Error(
-      "inspections.overall_result column does not exist."
-    );
+    return;
   }
 
   await env.SAFETY_DB
@@ -2117,6 +2390,13 @@ async function uploadToR2(
   }
 ): Promise<void> {
   try {
+    /*
+     * Existing R2 storage flow.
+     *
+     * DO NOT change the bucket.
+     * DO NOT change the binding.
+     */
+
     await env.PHOTOS.put(
       objectKey,
       photo.bytes,
@@ -2161,7 +2441,7 @@ async function analyze(
   env: Env
 ): Promise<Response> {
   let stage =
-    "request";
+    "starting";
 
   let inspectionId =
     "";
@@ -2177,7 +2457,7 @@ async function analyze(
 
   try {
     /* -----------------------------------------------------
-       1. Parse image
+       1. Parse request
        ----------------------------------------------------- */
 
     stage =
@@ -2192,7 +2472,7 @@ async function analyze(
       input.photo;
 
     /* -----------------------------------------------------
-       2. Create IDs
+       2. IDs
        ----------------------------------------------------- */
 
     stage =
@@ -2211,7 +2491,7 @@ async function analyze(
       nowISO();
 
     /* -----------------------------------------------------
-       3. Create R2 object key
+       3. R2 key
        ----------------------------------------------------- */
 
     stage =
@@ -2223,7 +2503,7 @@ async function analyze(
       )}`;
 
     /* -----------------------------------------------------
-       4. Create D1 inspection
+       4. D1 inspection
        ----------------------------------------------------- */
 
     stage =
@@ -2239,7 +2519,7 @@ async function analyze(
     );
 
     /* -----------------------------------------------------
-       5. Upload image to existing R2 bucket
+       5. Existing R2 upload
        ----------------------------------------------------- */
 
     stage =
@@ -2260,7 +2540,7 @@ async function analyze(
       true;
 
     /* -----------------------------------------------------
-       6. Save R2 key to D1
+       6. Save R2 key in D1
        ----------------------------------------------------- */
 
     stage =
@@ -2277,7 +2557,7 @@ async function analyze(
     );
 
     /* -----------------------------------------------------
-       7. Load safety checks
+       7. Load WSH checks
        ----------------------------------------------------- */
 
     stage =
@@ -2304,16 +2584,23 @@ async function analyze(
       );
 
     /* -----------------------------------------------------
-       9. Parse AI response
+       9. Parse AI
        ----------------------------------------------------- */
 
     stage =
       "parse AI response";
 
     const parsed =
-      parseTextFindings(
+      parseAIResponse(
         ai.raw
       );
+
+    /* -----------------------------------------------------
+       10. Match checks / normalize
+       ----------------------------------------------------- */
+
+    stage =
+      "match WSH checks";
 
     const findings =
       normalizeFindings(
@@ -2322,13 +2609,13 @@ async function analyze(
       );
 
     /* -----------------------------------------------------
-       10. Save findings
+       11. Save inspection items
        ----------------------------------------------------- */
 
     stage =
-      "D1 save findings";
+      "D1 save inspection items";
 
-    await insertFindings(
+    await insertInspectionItems(
       env,
       inspectionId,
       photoId,
@@ -2336,16 +2623,23 @@ async function analyze(
     );
 
     /* -----------------------------------------------------
-       11. Overall result
+       12. Overall result
        ----------------------------------------------------- */
 
     stage =
-      "D1 update inspection";
+      "calculate overall result";
 
     const result =
       overall(
         findings
       );
+
+    /* -----------------------------------------------------
+       13. Update inspection
+       ----------------------------------------------------- */
+
+    stage =
+      "D1 update inspection";
 
     await updateInspection(
       env,
@@ -2354,7 +2648,7 @@ async function analyze(
     );
 
     /* -----------------------------------------------------
-       12. Success
+       SUCCESS
        ----------------------------------------------------- */
 
     return jsonResponse({
@@ -2404,7 +2698,7 @@ async function analyze(
         response_preview:
           ai.raw.substring(
             0,
-            2000
+            3000
           ),
       },
 
@@ -2448,8 +2742,7 @@ async function analyze(
         : String(error);
 
     /*
-     * Clean up the R2 object only if this request
-     * successfully uploaded it.
+     * Best effort R2 cleanup.
      */
 
     if (
@@ -2461,13 +2754,12 @@ async function analyze(
           objectKey
         );
       } catch {
-        // Ignore cleanup failure.
+        // Ignore cleanup error.
       }
     }
 
     /*
-     * Try to mark the inspection as
-     * CHECK_REQUIRED if it already exists.
+     * Best effort inspection status.
      */
 
     if (
@@ -2484,17 +2776,33 @@ async function analyze(
       }
     }
 
-    /*
-     * IMPORTANT:
-     * Return the actual stage and error.
-     */
+    const diagnostic =
+      [
+        "AI analysis failed.",
+        `Stage: ${stage}`,
+        `Detail: ${detail}`,
+
+        inspectionId
+          ? `Inspection ID: ${inspectionId}`
+          : "",
+
+        photoId
+          ? `Photo ID: ${photoId}`
+          : "",
+
+        objectKey
+          ? `R2 object: ${objectKey}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
 
     return jsonResponse(
       {
         ok: false,
 
         error:
-          "AI analysis failed.",
+          diagnostic,
 
         stage,
 
@@ -2539,10 +2847,13 @@ async function getInspection(
         .bind(id)
         .first();
 
-    if (!inspection) {
+    if (
+      !inspection
+    ) {
       return jsonResponse(
         {
           ok: false,
+
           error:
             "Inspection not found.",
         },
@@ -2563,19 +2874,19 @@ async function getInspection(
         .bind(id)
         .all();
 
-    const findings =
+    const items =
       await env.SAFETY_DB
         .prepare(
           `
           SELECT
-            f.*,
+            ii.*,
             sc.check_question,
             sc.guidance
-          FROM findings f
+          FROM inspection_items ii
           LEFT JOIN safety_checks sc
-            ON sc.id = f.check_id
-          WHERE f.inspection_id = ?
-          ORDER BY f.created_at
+            ON sc.id = ii.check_id
+          WHERE ii.inspection_id = ?
+          ORDER BY ii.created_at
           `
         )
         .bind(id)
@@ -2591,7 +2902,7 @@ async function getInspection(
         [],
 
       findings:
-        findings.results ||
+        items.results ||
         [],
     });
   } catch (error) {
@@ -2693,12 +3004,18 @@ async function health(
       false;
   }
 
-  r2 =
-    !!env.PHOTOS;
+  try {
+    r2 =
+      !!env.PHOTOS;
+  } catch {
+    r2 =
+      false;
+  }
 
   return jsonResponse({
     ok:
       database &&
+      safetyChecks &&
       r2,
 
     worker:
@@ -2756,7 +3073,7 @@ async function safetyChecks(
 }
 
 /* =========================================================
-   R2 PHOTO API
+   PHOTO API
    ========================================================= */
 
 async function getPhoto(
@@ -2822,10 +3139,13 @@ async function api(
   const path =
     url.pathname;
 
-  /* Health */
+  /* -------------------------------------------------------
+     HEALTH
+     ------------------------------------------------------- */
 
   if (
-    request.method === "GET" &&
+    request.method ===
+      "GET" &&
     path ===
       "/api/health"
   ) {
@@ -2834,10 +3154,13 @@ async function api(
     );
   }
 
-  /* Analyse */
+  /* -------------------------------------------------------
+     ANALYZE
+     ------------------------------------------------------- */
 
   if (
-    request.method === "POST" &&
+    request.method ===
+      "POST" &&
     (
       path ===
         "/api/analyze" ||
@@ -2851,10 +3174,13 @@ async function api(
     );
   }
 
-  /* Recent inspections */
+  /* -------------------------------------------------------
+     RECENT INSPECTIONS
+     ------------------------------------------------------- */
 
   if (
-    request.method === "GET" &&
+    request.method ===
+      "GET" &&
     path ===
       "/api/inspections"
   ) {
@@ -2863,10 +3189,13 @@ async function api(
     );
   }
 
-  /* Inspection */
+  /* -------------------------------------------------------
+     SINGLE INSPECTION
+     ------------------------------------------------------- */
 
   if (
-    request.method === "GET" &&
+    request.method ===
+      "GET" &&
     path.startsWith(
       "/api/inspection/"
     )
@@ -2883,6 +3212,7 @@ async function api(
       return jsonResponse(
         {
           ok: false,
+
           error:
             "Missing inspection ID.",
         },
@@ -2896,10 +3226,13 @@ async function api(
     );
   }
 
-  /* Safety checks */
+  /* -------------------------------------------------------
+     SAFETY CHECKS
+     ------------------------------------------------------- */
 
   if (
-    request.method === "GET" &&
+    request.method ===
+      "GET" &&
     path ===
       "/api/safety-checks"
   ) {
@@ -2908,10 +3241,13 @@ async function api(
     );
   }
 
-  /* Photo */
+  /* -------------------------------------------------------
+     PHOTO
+     ------------------------------------------------------- */
 
   if (
-    request.method === "GET" &&
+    request.method ===
+      "GET" &&
     path ===
       "/api/photo"
   ) {
@@ -2947,7 +3283,7 @@ async function api(
 }
 
 /* =========================================================
-   WORKER ENTRY
+   WORKER
    ========================================================= */
 
 export default {
@@ -2956,7 +3292,9 @@ export default {
     env: Env
   ): Promise<Response> {
     try {
-      /* CORS preflight */
+      /* ---------------------------------------------------
+         CORS
+         --------------------------------------------------- */
 
       if (
         request.method ===
@@ -2986,7 +3324,9 @@ export default {
           request.url
         );
 
-      /* API */
+      /* ---------------------------------------------------
+         API
+         --------------------------------------------------- */
 
       if (
         url.pathname.startsWith(
@@ -3000,7 +3340,9 @@ export default {
         );
       }
 
-      /* Static assets */
+      /* ---------------------------------------------------
+         STATIC ASSETS
+         --------------------------------------------------- */
 
       try {
         const asset =
@@ -3009,12 +3351,13 @@ export default {
           );
 
         if (
-          asset.status !== 404
+          asset.status !==
+          404
         ) {
           return asset;
         }
       } catch {
-        // Fall through.
+        // Continue.
       }
 
       return new Response(
