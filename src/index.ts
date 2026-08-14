@@ -4,94 +4,5125 @@ export interface Env {
   PHOTOS: R2Bucket;
   VECTORIZE: VectorizeIndex;
   ASSETS: Fetcher;
+
+  /*
+   * Worker secret used only by:
+   *
+   * POST /api/vectorize/seed
+   */
   VECTORIZE_SEED_KEY?: string;
 }
 
-const MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
-const EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
-const VECTOR_MATCH_THRESHOLD = 0.45;
-const MAX_IMAGE_SIZE = 12 * 1024 * 1024;
+const MODEL =
+  "@cf/meta/llama-3.2-11b-vision-instruct";
+
+const EMBEDDING_MODEL =
+  "@cf/baai/bge-base-en-v1.5";
+
+const VECTOR_INDEX =
+  "safety-checks";
+
+const VECTOR_MATCH_THRESHOLD =
+  0.45;
+
+const MAX_IMAGE_SIZE =
+  12 * 1024 * 1024;
+
 const MAX_FINDINGS = 8;
-type Status = "PASS" | "FAIL" | "CHECK_REQUIRED";
-type Risk = "LOW" | "MEDIUM" | "HIGH";
 
-interface SafetyCheck { id:string; category:string; check_question:string; guidance:string; source_title:string; source_url:string; keywords:string; }
-interface Finding { category:string; title:string; observation:string; status:Status; risk_level:Risk; confidence:number; check_id:string|null; source_title:string|null; source_url:string|null; vector_score?:number|null; }
-interface PhotoInput { bytes:ArrayBuffer; contentType:string; fileName:string; }
-interface EmbeddingResponse { shape?:number[]; data:number[][]; pooling?:string; }
+const MAX_RETRIEVED_CHECKS = 8;
 
-function jsonResponse(data:unknown,status=200){return new Response(JSON.stringify(data),{status,headers:{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store","Access-Control-Allow-Origin":"*","Access-Control-Allow-Methods":"GET, POST, OPTIONS","Access-Control-Allow-Headers":"Content-Type, X-Vectorize-Seed-Key"}})}
-function textResponse(text:string,status=200){return new Response(text,{status,headers:{"Content-Type":"text/plain; charset=utf-8","Access-Control-Allow-Origin":"*"}})}
-function uuid(){return crypto.randomUUID()}
-function nowISO(){return new Date().toISOString()}
-function clean(v:unknown,max=2000){return v==null?"":String(v).replace(/\u0000/g,"").trim().substring(0,max)}
-function cleanMarkdown(v:unknown,max=2000){return clean(v,max).replace(/\*\*/g,"").replace(/__/g,"").replace(/^#+\s*/g,"").replace(/^[-*•]\s*/g,"").trim()}
-function inspectionNumber(){const d=new Date();return `SI-${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,"0")}${String(d.getUTCDate()).padStart(2,"0")}-${uuid().replace(/-/g,"").substring(0,6).toUpperCase()}`}
-function normalizeContentType(v:unknown){const t=String(v||"").toLowerCase().split(";")[0].trim();return ["image/png","image/webp","image/gif","image/heic","image/heif"].includes(t)?t:"image/jpeg"}
-function extension(t:string){return ({"image/png":"png","image/webp":"webp","image/gif":"gif","image/heic":"heic","image/heif":"heif"} as Record<string,string>)[t]||"jpg"}
-function safeFileName(v:string){const r=v.replace(/[^a-zA-Z0-9._-]/g,"_").substring(0,150);return r||"inspection-photo.jpg"}
-function arrayBufferToBase64(b:ArrayBuffer){const a=new Uint8Array(b);let s="";for(let i=0;i<a.length;i+=0x8000)s+=String.fromCharCode(...a.subarray(i,Math.min(i+0x8000,a.length)));return btoa(s)}
-function imageDataUrl(b:ArrayBuffer,t:string){return `data:${t};base64,${arrayBufferToBase64(b)}`}
+type Status =
+  | "PASS"
+  | "FAIL"
+  | "CHECK_REQUIRED";
 
-async function parseRequest(request:Request){
-  const ct=request.headers.get("content-type")||"";
-  if(ct.toLowerCase().includes("multipart/form-data")){
-    const form=await request.formData();let file:File|null=null;
-    for(const n of ["image","photo","file","photoFile"]){const v=form.get(n);if(v instanceof File){file=v;break}}
-    if(!file)for(const [,v] of form.entries())if(v instanceof File){file=v;break}
-    if(!file)throw new Error("No image file was uploaded.");
-    const bytes=await file.arrayBuffer();if(!bytes.byteLength)throw new Error("The uploaded image is empty.");if(bytes.byteLength>MAX_IMAGE_SIZE)throw new Error("The uploaded image is larger than 12 MB.");
-    return {photo:{bytes,contentType:normalizeContentType(file.type),fileName:safeFileName(file.name||"inspection-photo.jpg")},location:clean(form.get("location"),200)||"Unspecified",inspector:clean(form.get("inspector"),200)||"Unspecified"};
-  }
-  let body:any;try{body=await request.json()}catch{throw new Error("Request body is not valid JSON.")}
-  let base64=body?.image||body?.imageBase64||body?.photo;if(typeof base64!=="string"||!base64.trim())throw new Error("No image was supplied.");base64=base64.trim();let type=normalizeContentType(body?.mimeType||body?.contentType||"image/jpeg");
-  const m=base64.match(/^data:(image\/[^;]+);base64,(.+)$/s);if(m){type=normalizeContentType(m[1]);base64=m[2]}
-  let binary:string;try{binary=atob(base64)}catch{throw new Error("Image data is not valid base64.")}
-  const bytes=new Uint8Array(binary.length);for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);if(!bytes.byteLength)throw new Error("The image is empty.");if(bytes.byteLength>MAX_IMAGE_SIZE)throw new Error("The image is larger than 12 MB.");
-  return {photo:{bytes:bytes.buffer,contentType:type,fileName:safeFileName(body?.fileName||`inspection.${extension(type)}`)},location:clean(body?.location,200)||"Unspecified",inspector:clean(body?.inspector,200)||"Unspecified"};
+type Risk =
+  | "LOW"
+  | "MEDIUM"
+  | "HIGH";
+
+interface SafetyCheck {
+  id: string;
+  category: string;
+  check_question: string;
+  guidance: string;
+  source_title: string;
+  source_url: string;
+  keywords: string;
+  source_type?: string;
+  active?: number;
 }
 
-const TABLES=["inspections","inspection_photos","inspection_items","safety_checks","corrective_actions"];
-async function columns(db:D1Database,table:string){if(!TABLES.includes(table))throw new Error(`Invalid table: ${table}`);const r=await db.prepare(`PRAGMA table_info("${table}")`).all<{name:string}>();return new Set((r.results||[]).map(x=>x.name))}
-function insertSQL(table:string,cols:Set<string>,values:Record<string,unknown>){if(!TABLES.includes(table))throw new Error(`Invalid table: ${table}`);const e=Object.entries(values).filter(([c])=>cols.has(c));if(!e.length)throw new Error(`No matching columns found in ${table}.`);return {sql:`INSERT INTO "${table}" (${e.map(([c])=>`"${c}"`).join(",")}) VALUES (${e.map(()=>"?").join(",")})`,params:e.map(([,v])=>v)}}
+interface Finding {
+  category: string;
+  title: string;
+  observation: string;
+  evidence: string;
+  status: Status;
+  risk_level: Risk;
+  confidence: number;
+  check_id: string | null;
+  source_title: string | null;
+  source_url: string | null;
+}
 
-async function loadSafetyChecks(env:Env):Promise<SafetyCheck[]>{const c=await columns(env.SAFETY_DB,"safety_checks");const req=["id","category","check_question","guidance","source_title","source_url","keywords"];const miss=req.filter(x=>!c.has(x));if(miss.length)throw new Error(`safety_checks is missing columns: ${miss.join(", ")}`);const active=c.has("active")?"WHERE active = 1":"";const r=await env.SAFETY_DB.prepare(`SELECT id,category,check_question,guidance,source_title,source_url,keywords FROM safety_checks ${active} ORDER BY category,id LIMIT 40`).all<SafetyCheck>();return r.results||[]}
+interface PhotoInput {
+  bytes: ArrayBuffer;
+  contentType: string;
+  fileName: string;
+}
 
-function buildPrompt(checks:SafetyCheck[]){const list=checks.map(c=>`CHECK ID: ${c.id}\nCATEGORY: ${c.category}\nQUESTION: ${clean(c.check_question,350)}\nGUIDANCE: ${clean(c.guidance,500)}\nKEYWORDS: ${clean(c.keywords,250)}\nSOURCE: ${clean(c.source_title,250)}\nURL: ${clean(c.source_url,500)}`).join("\n\n");return `You are a careful workplace safety inspection assistant for a Singapore shipping/container depot.\n\nAnalyse ONLY what is visibly supported by the photograph. Do not invent hazards. Do not assume every safety category applies. Only assess a category when there is visible evidence relevant to that category. If a category is not visibly relevant, OMIT it completely.\n\nDo NOT create findings such as No visible lifting operation, No visible work at height, No visible electrical equipment, No visible fire hazards, or No visible storage. These are NOT findings and must be omitted.\n\nPASS means the visible condition appears satisfactory. FAIL means a visible unsafe condition is identified. CHECK_REQUIRED means a relevant safety condition is visible but the photograph is insufficient to determine whether it is safe.\n\nRISK: LOW=satisfactory/minor concern, MEDIUM=potential concern, HIGH=serious visible concern. Confidence must be 0 to 1.\n\nReturn only relevant visible findings using exactly:\n**PPE**\n* **Title:** Visible PPE appears appropriate\n* **Observation:** The worker is visibly wearing a hard hat and high-visibility vest.\n* **Status:** PASS\n* **Risk:** LOW\n* **Confidence:** 0.88\n* **Check ID:** ppe-001\n\nAVAILABLE WSH CHECKS:\n${list}`}
+interface ParsedRequest {
+  photo: PhotoInput;
+  location: string;
+  inspector: string;
+}
 
-async function runAI(env:Env,image:ArrayBuffer,type:string,checks:SafetyCheck[]){let r:any;try{r=await env.AI.run(MODEL,{messages:[{role:"system",content:"You are a careful Singapore workplace safety visual inspection assistant. Only report visible evidence."},{role:"user",content:buildPrompt(checks)}],image:imageDataUrl(image,type),max_tokens:900,temperature:0.05,top_p:0.8} as any)}catch(e){throw new Error(`Workers AI request failed: ${e instanceof Error?e.message:String(e)}`)}const raw=typeof r==="string"?r:typeof r?.response==="string"?r.response:typeof r?.result==="string"?r.result:"";if(!raw.trim())throw new Error(`Workers AI returned no text. Response: ${JSON.stringify(r).substring(0,3000)}`);return {raw:raw.trim(),result:r}}
-function confidence(v:string){const m=v?.match(/(\d+(?:\.\d+)?)/);if(!m)return .6;let n=Number(m[1]);if(n>1)n/=100;return Math.round(Math.max(0,Math.min(1,n))*100)/100}
-function status(v:string,o:string):Status{const t=cleanMarkdown(v).toUpperCase();if(t.includes("FAIL"))return"FAIL";if(t.includes("PASS"))return"PASS";if(t.includes("CHECK"))return"CHECK_REQUIRED";return ["unsafe","hazard","spill","obstructed","blocked","missing","damaged","exposed","unguarded"].some(x=>o.toLowerCase().includes(x))?"FAIL":"CHECK_REQUIRED"}
-function risk(v:string,s:Status):Risk{const t=cleanMarkdown(v).toUpperCase();if(t.includes("HIGH"))return"HIGH";if(t.includes("MEDIUM"))return"MEDIUM";if(t.includes("LOW"))return"LOW";return s==="FAIL"?"HIGH":s==="PASS"?"LOW":"MEDIUM"}
-function negative(c:string,t:string,o:string){const x=`${c} ${t} ${o}`.toLowerCase().replace(/\s+/g," ");return ["no visible","not visible","there is no visible","no evidence","cannot be determined","not observed","not apparent","no work at height","no lifting operation","no electrical equipment","no fire hazards","no storage hazards"].some(p=>x.includes(p))}
-function category(v:string){const x=cleanMarkdown(v,100).toLowerCase();if(x==="ppe"||x.includes("personal protective"))return"PPE";if(x.includes("housekeeping"))return"Housekeeping";if(x.includes("vehicular")||x.includes("vehicle")||x.includes("traffic"))return"Vehicular Safety";if(x.includes("work at height")||x.includes("working at height"))return"Work at Height";if(x.includes("lifting"))return"Lifting";if(x.includes("electrical"))return"Electrical Safety";if(x.includes("fire"))return"Fire Safety";if(x.includes("storage"))return"Storage";return cleanMarkdown(v,100)}
+interface SceneAnalysis {
+  scene_summary: string;
+  visible_objects: string[];
+  visible_activities: string[];
+  visible_hazards: string[];
+  visible_controls: string[];
+  people_visible: boolean;
+  vehicles_visible: boolean;
+  machinery_visible: boolean;
+  lifting_visible: boolean;
+  hot_work_visible: boolean;
+  electrical_visible: boolean;
+  chemicals_visible: boolean;
+  cylinders_visible: boolean;
+  elevated_work_visible: boolean;
+  storage_visible: boolean;
+  relevant_categories: string[];
+}
 
-function parseAI(raw:string){const text=raw.replace(/\r/g,"").trim();const out:any[]=[];const re=/(?:^|\n)\s*\*\*([^*\n]+)\*\*\s*(?=\n)/g;const hs:any[]=[];let m:RegExpExecArray|null;while((m=re.exec(text))!==null){const c=cleanMarkdown(m[1]);if(c&&!['Title','Observation','Status','Risk','Confidence','Check ID','Category'].includes(c))hs.push({index:m.index,category:c})}for(let i=0;i<hs.length&&out.length<MAX_FINDINGS;i++){const body=text.substring(hs[i].index,i+1<hs.length?hs[i+1].index:text.length),c=category(hs[i].category);const tm=body.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Title:\*\*\s*(.+?)(?=\n|$)/i),om=body.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Observation:\*\*\s*(.+?)(?=\n|$)/i),sm=body.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Status:\*\*\s*(PASS|FAIL|CHECK_REQUIRED)/i),rm=body.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Risk:\*\*\s*(LOW|MEDIUM|HIGH)/i),cm=body.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Confidence:\*\*\s*([0-9.]+)/i),im=body.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Check ID:\*\*\s*([^\s\n]+)/i);const t=cleanMarkdown(tm?.[1]||`${c} observation`),o=cleanMarkdown(om?.[1]||"");if(!o||negative(c,t,o))continue;const s=status(sm?.[1]||"",o);out.push({category:c,title:t,observation:o,status:s,risk:risk(rm?.[1]||"",s),confidence:confidence(cm?.[1]||""),checkId:cleanMarkdown(im?.[1]||"")})}return out.length?out:legacy(raw)}
-function legacy(raw:string){const out:any[]=[];for(const b of raw.split(/(?=\*\*Category:\*\*)/i)){const cm=b.match(/\*\*Category:\*\*\s*(.+?)(?=\n|$)/i);if(!cm)continue;const c=category(cm[1]),tm=b.match(/\*\*Title:\*\*\s*(.+?)(?=\n|$)/i),om=b.match(/\*\*Observation:\*\*\s*(.+?)(?=\n|$)/i),sm=b.match(/\*\*Status:\*\*\s*(PASS|FAIL|CHECK_REQUIRED)/i),rm=b.match(/\*\*Risk:\*\*\s*(LOW|MEDIUM|HIGH)/i),cmf=b.match(/\*\*Confidence:\*\*\s*([0-9.]+)/i),im=b.match(/\*\*Check ID:\*\*\s*([^\s\n]+)/i);const t=cleanMarkdown(tm?.[1]||`${c} observation`),o=cleanMarkdown(om?.[1]||"");if(!o||negative(c,t,o))continue;const s=status(sm?.[1]||"",o);out.push({category:c,title:t,observation:o,status:s,risk:risk(rm?.[1]||"",s),confidence:confidence(cmf?.[1]||""),checkId:cleanMarkdown(im?.[1]||"")});if(out.length>=MAX_FINDINGS)break}return out}
+interface RetrievedCheck {
+  check: SafetyCheck;
+  score: number;
+}
 
-async function embed(env:Env,text:string){let r:EmbeddingResponse;try{r=await env.AI.run(EMBEDDING_MODEL,{text:[text]}) as EmbeddingResponse}catch(e){throw new Error(`Embedding generation failed: ${e instanceof Error?e.message:String(e)}`)}const v=r?.data?.[0];if(!Array.isArray(v)||v.length!==768)throw new Error(`Invalid embedding returned. Expected 768 dimensions, got ${Array.isArray(v)?v.length:0}.`);return v}
-async function vectorSearch(env:Env,f:{category:string;title:string;observation:string}){const v=await embed(env,`Safety category: ${f.category}. Finding: ${f.title}. Observation: ${f.observation}`);let r:any;try{r=await env.VECTORIZE.query(v,{topK:3,returnMetadata:"none"} as any)}catch(e){throw new Error(`Vectorize query failed: ${e instanceof Error?e.message:String(e)}`)}for(const x of Array.isArray(r?.matches)?r.matches:[]){const score=Number(x?.score),id=clean(x?.id,200);if(!id||!Number.isFinite(score)||score<VECTOR_MATCH_THRESHOLD)continue;const c=await env.SAFETY_DB.prepare(`SELECT id,category,check_question,guidance,source_title,source_url,keywords FROM safety_checks WHERE id=? LIMIT 1`).bind(id).first<SafetyCheck>();if(c)return{check:c,score:Math.round(score*1000)/1000}}const best=Number(r?.matches?.[0]?.score);return{check:null,score:Number.isFinite(best)?Math.round(best*1000)/1000:null}}
-async function findCheck(env:Env,f:{category:string;title:string;observation:string;checkId:string}){try{const v=await vectorSearch(env,f);if(v.check)return{check:v.check,vectorScore:v.score,method:"vectorize"};if(f.checkId){const c=await env.SAFETY_DB.prepare(`SELECT id,category,check_question,guidance,source_title,source_url,keywords FROM safety_checks WHERE id=? LIMIT 1`).bind(f.checkId).first<SafetyCheck>();if(c)return{check:c,vectorScore:v.score,method:"ai_check_id"}}return{check:null,vectorScore:v.score,method:"none"}}catch{if(f.checkId){try{const c=await env.SAFETY_DB.prepare(`SELECT id,category,check_question,guidance,source_title,source_url,keywords FROM safety_checks WHERE id=? LIMIT 1`).bind(f.checkId).first<SafetyCheck>();if(c)return{check:c,vectorScore:null,method:"ai_check_id"}}catch{}}return{check:null,vectorScore:null,method:"none"}}}
-async function normalizeFindings(env:Env,parsed:any[]):Promise<Finding[]>{const out:Finding[]=[];const seen=new Set<string>();for(const x of parsed){const c=category(x.category),t=cleanMarkdown(x.title,250),o=cleanMarkdown(x.observation,1200);if(!c||!o||negative(c,t,o))continue;const key=`${c}|${t}|${o}`.toLowerCase().replace(/\s+/g," ");if(seen.has(key))continue;seen.add(key);const m=await findCheck(env,{category:c,title:t,observation:o,checkId:x.checkId});out.push({category:c,title:t,observation:o,status:x.status,risk_level:x.risk,confidence:Math.round(Math.max(0,Math.min(1,Number(x.confidence)||.6))*100)/100,check_id:m.check?.id||null,source_title:m.check?.source_title||null,source_url:m.check?.source_url||null,vector_score:m.vectorScore});if(out.length>=MAX_FINDINGS)break}return out}
-function overall(fs:Finding[]):"PASS"|"ATTENTION"|"CHECK_REQUIRED"{if(!fs.length)return"CHECK_REQUIRED";if(fs.some(f=>f.status==="FAIL"))return"ATTENTION";if(fs.some(f=>f.status==="CHECK_REQUIRED"))return"CHECK_REQUIRED";return"PASS"}
-function summary(fs:Finding[]){if(!fs.length)return"No visible safety conditions were identified from the photograph.";const p=fs.filter(f=>f.status==="PASS").length,f=fs.filter(f=>f.status==="FAIL").length,c=fs.filter(f=>f.status==="CHECK_REQUIRED").length;if(f)return`${f} visible safety finding(s) require corrective attention. ${c} item(s) require verification and ${p} item(s) passed.`;if(c)return`${c} visible safety item(s) require verification. ${p} item(s) passed.`;return`${p} visible safety item(s) were assessed as PASS.`}
+/* =========================================================
+   RESPONSE HELPERS
+   ========================================================= */
 
-async function saveInspection(env:Env,id:string,no:string,location:string,inspector:string,created:string){const c=await columns(env.SAFETY_DB,"inspections"),q=insertSQL("inspections",c,{id,inspection_no:no,location:location||null,inspector:inspector||null,created_at:created,overall_result:"CHECK_REQUIRED"});await env.SAFETY_DB.prepare(q.sql).bind(...q.params).run()}
-async function savePhoto(env:Env,pid:string,iid:string,key:string,name:string,type:string,created:string){const c=await columns(env.SAFETY_DB,"inspection_photos");if(!c.has("object_key"))throw new Error("inspection_photos.object_key column does not exist.");const q=insertSQL("inspection_photos",c,{id:pid,inspection_id:iid,object_key:key,file_name:name,content_type:type,created_at:created});await env.SAFETY_DB.prepare(q.sql).bind(...q.params).run()}
-async function saveItems(env:Env,iid:string,pid:string,fs:Finding[]){if(!fs.length)return;const c=await columns(env.SAFETY_DB,"inspection_items");await env.SAFETY_DB.batch(fs.map(f=>{const q=insertSQL("inspection_items",c,{id:uuid(),inspection_id:iid,photo_id:pid,category:f.category,title:f.title,observation:f.observation,status:f.status,risk_level:f.risk_level,confidence:f.confidence,check_id:f.check_id,source_title:f.source_title,source_url:f.source_url,vector_score:f.vector_score,created_at:nowISO()});return env.SAFETY_DB.prepare(q.sql).bind(...q.params)}))}
-async function updateInspection(env:Env,id:string,result:"PASS"|"ATTENTION"|"CHECK_REQUIRED"){const c=await columns(env.SAFETY_DB,"inspections");if(c.has("overall_result"))await env.SAFETY_DB.prepare("UPDATE inspections SET overall_result=? WHERE id=?").bind(result,id).run()}
-async function r2put(env:Env,key:string,p:PhotoInput,meta:any){await env.PHOTOS.put(key,p.bytes,{httpMetadata:{contentType:p.contentType,contentDisposition:`inline; filename="${p.fileName}"`},customMetadata:meta})}
+function jsonResponse(
+  data: unknown,
+  status = 200
+): Response {
+  return new Response(
+    JSON.stringify(data),
+    {
+      status,
+      headers: {
+        "Content-Type":
+          "application/json; charset=utf-8",
 
-async function analyze(request:Request,env:Env){let stage="starting",iid="",pid="",key="",uploaded=false;try{stage="parse image";const input=await parseRequest(request),p=input.photo;stage="create IDs";iid=uuid();pid=uuid();const no=inspectionNumber(),created=nowISO();key=`inspections/${iid}/${pid}.${extension(p.contentType)}`;stage="D1 create inspection";await saveInspection(env,iid,no,input.location,input.inspector,created);stage="R2 upload";await r2put(env,key,p,{inspectionId:iid,photoId:pid,inspectionNo:no});uploaded=true;stage="D1 save inspection photo";await savePhoto(env,pid,iid,key,p.fileName,p.contentType,created);stage="load safety checks";const checks=await loadSafetyChecks(env);stage="Workers AI Vision";const ai=await runAI(env,p.bytes,p.contentType,checks);stage="parse AI response";const parsed=parseAI(ai.raw);stage="Vectorize semantic matching";const fs=await normalizeFindings(env,parsed);stage="D1 save inspection items";await saveItems(env,iid,pid,fs);stage="update result";const result=overall(fs);await updateInspection(env,iid,result);return jsonResponse({ok:true,inspection:{id:iid,inspection_no:no,location:input.location,inspector:input.inspector,overall_result:result,created_at:created},photo:{id:pid,object_key:key,file_name:p.fileName,content_type:p.contentType},ai:{model:MODEL,embedding_model:EMBEDDING_MODEL,response_length:ai.raw.length,response_preview:ai.raw.substring(0,3000)},vectorize:{enabled:true,index:"safety-checks",threshold:VECTOR_MATCH_THRESHOLD,matches_used:fs.filter(f=>f.vector_score!=null).length},summary:summary(fs),findings:fs,counts:{total:fs.length,pass:fs.filter(f=>f.status==="PASS").length,fail:fs.filter(f=>f.status==="FAIL").length,check_required:fs.filter(f=>f.status==="CHECK_REQUIRED").length}})}catch(e){const detail=e instanceof Error?e.message:String(e);if(uploaded&&key)try{await env.PHOTOS.delete(key)}catch{}if(iid)try{await updateInspection(env,iid,"CHECK_REQUIRED")}catch{}return jsonResponse({ok:false,error:`AI analysis failed.\nStage: ${stage}\nDetail: ${detail}`,stage,detail,inspectionId:iid||null,photoId:pid||null,objectKey:key||null},500)}}
+        "Cache-Control":
+          "no-store",
 
-async function seedVectorize(request:Request,env:Env){const secret=clean(env.VECTORIZE_SEED_KEY,500);if(!secret)return jsonResponse({ok:false,error:"VECTORIZE_SEED_KEY is not configured. Create this Worker secret before running the seed operation."},503);if(clean(request.headers.get("X-Vectorize-Seed-Key"),500)!==secret)return jsonResponse({ok:false,error:"Invalid Vectorize seed key."},401);try{const checks=await loadSafetyChecks(env);const texts=checks.map(c=>`Safety category: ${c.category}. Check: ${c.check_question}. Guidance: ${c.guidance}. Keywords: ${c.keywords}.`);const r=await env.AI.run(EMBEDDING_MODEL,{text:texts}) as EmbeddingResponse;if(!r?.data||r.data.length!==checks.length)throw new Error(`Embedding count mismatch. Expected ${checks.length}, got ${r?.data?.length||0}.`);const vectors:VectorizeVector[]=checks.map((c,i)=>({id:c.id,values:r.data[i],metadata:{category:c.category,source_title:c.source_title}}));const mutation=await env.VECTORIZE.upsert(vectors);return jsonResponse({ok:true,message:"Safety checks successfully indexed into Vectorize.",index:"safety-checks",embedding_model:EMBEDDING_MODEL,dimensions:768,indexed:checks.length,ids:checks.map(c=>c.id),mutation})}catch(e){return jsonResponse({ok:false,error:e instanceof Error?e.message:String(e)},500)}}
-async function vectorTest(request:Request,env:Env){try{const b=await request.json().catch(()=>({}));const q=clean(b?.query,1000);if(!q)return jsonResponse({ok:false,error:"Missing query."},400);const v=await embed(env,q);const r=await env.VECTORIZE.query(v,{topK:5,returnMetadata:"all"} as any);return jsonResponse({ok:true,query:q,embedding_model:EMBEDDING_MODEL,dimensions:v.length,threshold:VECTOR_MATCH_THRESHOLD,matches:r?.matches||[]})}catch(e){return jsonResponse({ok:false,error:e instanceof Error?e.message:String(e)},500)}}
+        "Access-Control-Allow-Origin":
+          "*",
 
-async function health(env:Env){let database=false,safetyChecks=false,r2=false,vectorize=false;try{await env.SAFETY_DB.prepare("SELECT 1 AS ok").first();database=true}catch{}try{await loadSafetyChecks(env);safetyChecks=true}catch{}try{r2=!!env.PHOTOS}catch{}try{vectorize=!!env.VECTORIZE}catch{}return jsonResponse({ok:database&&safetyChecks&&r2&&vectorize,worker:"depot-safety",model:MODEL,embedding_model:EMBEDDING_MODEL,database,safety_checks:safetyChecks,r2,vectorize,vectorize_index:"safety-checks",vectorize_dimensions:768,vector_match_threshold:VECTOR_MATCH_THRESHOLD,timestamp:nowISO()})}
-async function inspections(env:Env){const r=await env.SAFETY_DB.prepare("SELECT * FROM inspections ORDER BY created_at DESC LIMIT 30").all();return jsonResponse({ok:true,inspections:r.results||[]})}
-async function inspection(env:Env,id:string){const i=await env.SAFETY_DB.prepare("SELECT * FROM inspections WHERE id=? LIMIT 1").bind(id).first();if(!i)return jsonResponse({ok:false,error:"Inspection not found."},404);const p=await env.SAFETY_DB.prepare("SELECT * FROM inspection_photos WHERE inspection_id=? ORDER BY created_at").bind(id).all();const f=await env.SAFETY_DB.prepare("SELECT ii.*,sc.check_question,sc.guidance FROM inspection_items ii LEFT JOIN safety_checks sc ON sc.id=ii.check_id WHERE ii.inspection_id=? ORDER BY ii.created_at").bind(id).all();return jsonResponse({ok:true,inspection:i,photos:p.results||[],findings:f.results||[]})}
-async function photo(env:Env,key:string){const o=await env.PHOTOS.get(key);if(!o)return textResponse("Photo not found.",404);const h=new Headers();o.writeHttpMetadata(h);h.set("ETag",o.httpEtag);h.set("Cache-Control","private, max-age=3600");return new Response(o.body,{headers:h})}
+        "Access-Control-Allow-Methods":
+          "GET, POST, OPTIONS",
 
-async function api(request:Request,env:Env,url:URL){const p=url.pathname;if(request.method==="GET"&&p==="/api/health")return health(env);if(request.method==="POST"&&(p==="/api/analyze"||p==="/api/analysis"))return analyze(request,env);if(request.method==="GET"&&p==="/api/inspections")return inspections(env);if(request.method==="GET"&&p.startsWith("/api/inspection/"))return inspection(env,decodeURIComponent(p.substring(17)));if(request.method==="GET"&&p==="/api/safety-checks")return jsonResponse({ok:true,count:(await loadSafetyChecks(env)).length,checks:await loadSafetyChecks(env)});if(request.method==="GET"&&p==="/api/photo"){const k=url.searchParams.get("key");return k?photo(env,k):textResponse("Missing photo key.",400)}if(request.method==="POST"&&p==="/api/vectorize/seed")return seedVectorize(request,env);if(request.method==="POST"&&p==="/api/vectorize/test")return vectorTest(request,env);return jsonResponse({ok:false,error:"API endpoint not found.",path:p},404)}
+        "Access-Control-Allow-Headers":
+          "Content-Type, X-Vectorize-Seed-Key",
+      },
+    }
+  );
+}
 
-export default {async fetch(request:Request,env:Env){try{if(request.method==="OPTIONS")return new Response(null,{status:204,headers:{"Access-Control-Allow-Origin":"*","Access-Control-Allow-Methods":"GET, POST, OPTIONS","Access-Control-Allow-Headers":"Content-Type, X-Vectorize-Seed-Key"}});const url=new URL(request.url);if(url.pathname.startsWith("/api/"))return api(request,env,url);try{const asset=await env.ASSETS.fetch(request);if(asset.status!==404)return asset}catch{}return new Response("Depot Safety AI is running.",{status:200,headers:{"Content-Type":"text/plain; charset=utf-8"}})}catch(e){return jsonResponse({ok:false,error:e instanceof Error?e.message:String(e)},500)}}} satisfies ExportedHandler<Env>;
+function textResponse(
+  text: string,
+  status = 200
+): Response {
+  return new Response(text, {
+    status,
+
+    headers: {
+      "Content-Type":
+        "text/plain; charset=utf-8",
+
+      "Access-Control-Allow-Origin":
+        "*",
+    },
+  });
+}
+
+/* =========================================================
+   GENERAL HELPERS
+   ========================================================= */
+
+function uuid(): string {
+  return crypto.randomUUID();
+}
+
+function nowISO(): string {
+  return new Date().toISOString();
+}
+
+function clean(
+  value: unknown,
+  max = 2000
+): string {
+  if (
+    value === null ||
+    value === undefined
+  ) {
+    return "";
+  }
+
+  return String(value)
+    .replace(/\u0000/g, "")
+    .trim()
+    .substring(0, max);
+}
+
+function cleanMarkdown(
+  value: unknown,
+  max = 2000
+): string {
+  return clean(value, max)
+    .replace(/\*\*/g, "")
+    .replace(/__/g, "")
+    .replace(/^#+\s*/g, "")
+    .replace(/^[-*•]\s*/g, "")
+    .trim();
+}
+
+function inspectionNumber(): string {
+  const d = new Date();
+
+  const y =
+    d.getUTCFullYear();
+
+  const m =
+    String(
+      d.getUTCMonth() + 1
+    ).padStart(2, "0");
+
+  const day =
+    String(
+      d.getUTCDate()
+    ).padStart(2, "0");
+
+  const random =
+    crypto
+      .randomUUID()
+      .replace(/-/g, "")
+      .substring(0, 6)
+      .toUpperCase();
+
+  return `SI-${y}${m}${day}-${random}`;
+}
+
+function normalizeContentType(
+  value: unknown
+): string {
+  const type =
+    String(value || "")
+      .toLowerCase()
+      .split(";")[0]
+      .trim();
+
+  if (type === "image/png")
+    return "image/png";
+
+  if (type === "image/webp")
+    return "image/webp";
+
+  if (type === "image/gif")
+    return "image/gif";
+
+  if (type === "image/heic")
+    return "image/heic";
+
+  if (type === "image/heif")
+    return "image/heif";
+
+  return "image/jpeg";
+}
+
+function extension(
+  contentType: string
+): string {
+  switch (contentType) {
+    case "image/png":
+      return "png";
+
+    case "image/webp":
+      return "webp";
+
+    case "image/gif":
+      return "gif";
+
+    case "image/heic":
+      return "heic";
+
+    case "image/heif":
+      return "heif";
+
+    default:
+      return "jpg";
+  }
+}
+
+function safeFileName(
+  value: string
+): string {
+  const result =
+    value
+      .replace(
+        /[^a-zA-Z0-9._-]/g,
+        "_"
+      )
+      .substring(0, 150);
+
+  return (
+    result ||
+    "inspection-photo.jpg"
+  );
+}
+
+/* =========================================================
+   BASE64
+   ========================================================= */
+
+function arrayBufferToBase64(
+  buffer: ArrayBuffer
+): string {
+  const bytes =
+    new Uint8Array(buffer);
+
+  let binary = "";
+
+  const chunkSize =
+    0x8000;
+
+  for (
+    let i = 0;
+    i < bytes.length;
+    i += chunkSize
+  ) {
+    const chunk =
+      bytes.subarray(
+        i,
+        Math.min(
+          i + chunkSize,
+          bytes.length
+        )
+      );
+
+    binary +=
+      String.fromCharCode(
+        ...chunk
+      );
+  }
+
+  return btoa(binary);
+}
+
+function imageDataUrl(
+  bytes: ArrayBuffer,
+  contentType: string
+): string {
+  return (
+    `data:${contentType};base64,` +
+    arrayBufferToBase64(bytes)
+  );
+}
+
+/* =========================================================
+   REQUEST PARSER
+   ========================================================= */
+
+async function parseRequest(
+  request: Request
+): Promise<ParsedRequest> {
+  const contentType =
+    request.headers.get(
+      "content-type"
+    ) || "";
+
+  if (
+    contentType
+      .toLowerCase()
+      .includes(
+        "multipart/form-data"
+      )
+  ) {
+    const form =
+      await request.formData();
+
+    let file: File | null =
+      null;
+
+    const possibleNames = [
+      "image",
+      "photo",
+      "file",
+      "photoFile",
+    ];
+
+    for (
+      const name of possibleNames
+    ) {
+      const value =
+        form.get(name);
+
+      if (
+        value instanceof File
+      ) {
+        file = value;
+        break;
+      }
+    }
+
+    if (!file) {
+      for (
+        const [, value] of form.entries()
+      ) {
+        if (
+          value instanceof File
+        ) {
+          file = value;
+          break;
+        }
+      }
+    }
+
+    if (!file) {
+      throw new Error(
+        "No image file was uploaded."
+      );
+    }
+
+    const bytes =
+      await file.arrayBuffer();
+
+    if (!bytes.byteLength) {
+      throw new Error(
+        "The uploaded image is empty."
+      );
+    }
+
+    if (
+      bytes.byteLength >
+      MAX_IMAGE_SIZE
+    ) {
+      throw new Error(
+        "The uploaded image is larger than 12 MB."
+      );
+    }
+
+    return {
+      photo: {
+        bytes,
+
+        contentType:
+          normalizeContentType(
+            file.type
+          ),
+
+        fileName:
+          safeFileName(
+            file.name ||
+              "inspection-photo.jpg"
+          ),
+      },
+
+      location:
+        clean(
+          form.get("location"),
+          200
+        ) ||
+        "Unspecified",
+
+      inspector:
+        clean(
+          form.get("inspector"),
+          200
+        ) ||
+        "Unspecified",
+    };
+  }
+
+  let body: any;
+
+  try {
+    body =
+      await request.json();
+  } catch {
+    throw new Error(
+      "Request body is not valid JSON."
+    );
+  }
+
+  let base64 =
+    body?.image ||
+    body?.imageBase64 ||
+    body?.photo;
+
+  if (
+    typeof base64 !==
+      "string" ||
+    !base64.trim()
+  ) {
+    throw new Error(
+      "No image was supplied."
+    );
+  }
+
+  base64 =
+    base64.trim();
+
+  let imageType =
+    normalizeContentType(
+      body?.mimeType ||
+        body?.contentType ||
+        "image/jpeg"
+    );
+
+  const match =
+    base64.match(
+      /^data:(image\/[^;]+);base64,(.+)$/s
+    );
+
+  if (match) {
+    imageType =
+      normalizeContentType(
+        match[1]
+      );
+
+    base64 =
+      match[2];
+  }
+
+  let binary: string;
+
+  try {
+    binary =
+      atob(base64);
+  } catch {
+    throw new Error(
+      "Image data is not valid base64."
+    );
+  }
+
+  const bytes =
+    new Uint8Array(
+      binary.length
+    );
+
+  for (
+    let i = 0;
+    i < binary.length;
+    i++
+  ) {
+    bytes[i] =
+      binary.charCodeAt(i);
+  }
+
+  if (!bytes.byteLength) {
+    throw new Error(
+      "The image is empty."
+    );
+  }
+
+  if (
+    bytes.byteLength >
+    MAX_IMAGE_SIZE
+  ) {
+    throw new Error(
+      "The image is larger than 12 MB."
+    );
+  }
+
+  return {
+    photo: {
+      bytes:
+        bytes.buffer,
+
+      contentType:
+        imageType,
+
+      fileName:
+        safeFileName(
+          body?.fileName ||
+            `inspection.${extension(
+              imageType
+            )}`
+        ),
+    },
+
+    location:
+      clean(
+        body?.location,
+        200
+      ) ||
+      "Unspecified",
+
+    inspector:
+      clean(
+        body?.inspector,
+        200
+      ) ||
+      "Unspecified",
+  };
+}
+
+/* =========================================================
+   D1 TABLE HELPERS
+   ========================================================= */
+
+const ALLOWED_TABLES = [
+  "inspections",
+  "inspection_photos",
+  "inspection_items",
+  "safety_checks",
+  "corrective_actions",
+];
+
+async function getTableColumns(
+  db: D1Database,
+  table: string
+): Promise<Set<string>> {
+  if (
+    !ALLOWED_TABLES.includes(
+      table
+    )
+  ) {
+    throw new Error(
+      `Invalid table name: ${table}`
+    );
+  }
+
+  const result =
+    await db
+      .prepare(
+        `PRAGMA table_info("${table}")`
+      )
+      .all<{
+        name: string;
+      }>();
+
+  return new Set(
+    (result.results || [])
+      .map(
+        row => row.name
+      )
+  );
+}
+
+function buildInsert(
+  table: string,
+  columns: Set<string>,
+  values: Record<
+    string,
+    unknown
+  >
+): {
+  sql: string;
+  params: unknown[];
+} {
+  if (
+    !ALLOWED_TABLES.includes(
+      table
+    )
+  ) {
+    throw new Error(
+      `Invalid insert table: ${table}`
+    );
+  }
+
+  const selected =
+    Object.entries(
+      values
+    ).filter(
+      ([column]) =>
+        columns.has(
+          column
+        )
+    );
+
+  if (!selected.length) {
+    throw new Error(
+      `No matching columns found in ${table}.`
+    );
+  }
+
+  const names =
+    selected.map(
+      ([column]) =>
+        `"${column}"`
+    );
+
+  const placeholders =
+    selected.map(
+      () => "?"
+    );
+
+  const params =
+    selected.map(
+      ([, value]) =>
+        value
+    );
+
+  return {
+    sql: `
+      INSERT INTO "${table}"
+      (${names.join(", ")})
+      VALUES (${placeholders.join(", ")})
+    `,
+
+    params,
+  };
+}
+
+/* =========================================================
+   SAFETY CHECKS
+   ========================================================= */
+
+async function loadSafetyChecks(
+  env: Env
+): Promise<SafetyCheck[]> {
+  const columns =
+    await getTableColumns(
+      env.SAFETY_DB,
+      "safety_checks"
+    );
+
+  const required = [
+    "id",
+    "category",
+    "check_question",
+    "guidance",
+    "source_title",
+    "source_url",
+    "keywords",
+  ];
+
+  const missing =
+    required.filter(
+      column =>
+        !columns.has(
+          column
+        )
+    );
+
+  if (missing.length) {
+    throw new Error(
+      `safety_checks is missing columns: ${missing.join(
+        ", "
+      )}`
+    );
+  }
+
+  const hasSourceType =
+    columns.has(
+      "source_type"
+    );
+
+  const sourceType =
+    hasSourceType
+      ? ", source_type"
+      : "";
+
+  const result =
+    await env.SAFETY_DB
+      .prepare(
+        `
+        SELECT
+          id,
+          category,
+          check_question,
+          guidance,
+          source_title,
+          source_url,
+          keywords
+          ${sourceType}
+        FROM safety_checks
+        WHERE active = 1
+        ORDER BY category, id
+        LIMIT 100
+        `
+      )
+      .all<SafetyCheck>();
+
+  return (
+    result.results || []
+  );
+}
+
+/* =========================================================
+   SCENE ANALYSIS
+   ========================================================= */
+
+function defaultScene(): SceneAnalysis {
+  return {
+    scene_summary:
+      "",
+
+    visible_objects:
+      [],
+
+    visible_activities:
+      [],
+
+    visible_hazards:
+      [],
+
+    visible_controls:
+      [],
+
+    people_visible:
+      false,
+
+    vehicles_visible:
+      false,
+
+    machinery_visible:
+      false,
+
+    lifting_visible:
+      false,
+
+    hot_work_visible:
+      false,
+
+    electrical_visible:
+      false,
+
+    chemicals_visible:
+      false,
+
+    cylinders_visible:
+      false,
+
+    elevated_work_visible:
+      false,
+
+    storage_visible:
+      false,
+
+    relevant_categories:
+      [],
+  };
+}
+
+function extractJsonObject(
+  raw: string
+): any | null {
+  let text =
+    clean(
+      raw,
+      10000
+    );
+
+  text =
+    text
+      .replace(
+        /^```json\s*/i,
+        ""
+      )
+      .replace(
+        /^```\s*/i,
+        ""
+      )
+      .replace(
+        /\s*```$/i,
+        ""
+      )
+      .trim();
+
+  try {
+    return JSON.parse(
+      text
+    );
+  } catch {
+    // Continue.
+  }
+
+  const first =
+    text.indexOf("{");
+
+  const last =
+    text.lastIndexOf("}");
+
+  if (
+    first < 0 ||
+    last <= first
+  ) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(
+      text.substring(
+        first,
+        last + 1
+      )
+    );
+  } catch {
+    return null;
+  }
+}
+
+function booleanValue(
+  value: unknown
+): boolean {
+  if (
+    value === true
+  ) {
+    return true;
+  }
+
+  const text =
+    String(value || "")
+      .toLowerCase()
+      .trim();
+
+  return (
+    text === "true" ||
+    text === "yes" ||
+    text === "1"
+  );
+}
+
+function stringArray(
+  value: unknown,
+  max = 20
+): string[] {
+  if (
+    !Array.isArray(value)
+  ) {
+    return [];
+  }
+
+  return value
+    .map(
+      item =>
+        clean(
+          item,
+          200
+        )
+    )
+    .filter(Boolean)
+    .slice(0, max);
+}
+
+function normalizeScene(
+  value: any
+): SceneAnalysis {
+  const fallback =
+    defaultScene();
+
+  if (
+    !value ||
+    typeof value !==
+      "object"
+  ) {
+    return fallback;
+  }
+
+  return {
+    scene_summary:
+      clean(
+        value.scene_summary,
+        1200
+      ),
+
+    visible_objects:
+      stringArray(
+        value.visible_objects
+      ),
+
+    visible_activities:
+      stringArray(
+        value.visible_activities
+      ),
+
+    visible_hazards:
+      stringArray(
+        value.visible_hazards
+      ),
+
+    visible_controls:
+      stringArray(
+        value.visible_controls
+      ),
+
+    people_visible:
+      booleanValue(
+        value.people_visible
+      ),
+
+    vehicles_visible:
+      booleanValue(
+        value.vehicles_visible
+      ),
+
+    machinery_visible:
+      booleanValue(
+        value.machinery_visible
+      ),
+
+    lifting_visible:
+      booleanValue(
+        value.lifting_visible
+      ),
+
+    hot_work_visible:
+      booleanValue(
+        value.hot_work_visible
+      ),
+
+    electrical_visible:
+      booleanValue(
+        value.electrical_visible
+      ),
+
+    chemicals_visible:
+      booleanValue(
+        value.chemicals_visible
+      ),
+
+    cylinders_visible:
+      booleanValue(
+        value.cylinders_visible
+      ),
+
+    elevated_work_visible:
+      booleanValue(
+        value.elevated_work_visible
+      ),
+
+    storage_visible:
+      booleanValue(
+        value.storage_visible
+      ),
+
+    relevant_categories:
+      stringArray(
+        value.relevant_categories
+      ),
+  };
+}
+
+async function analyzeScene(
+  env: Env,
+  image: ArrayBuffer,
+  contentType: string
+): Promise<{
+  scene: SceneAnalysis;
+  raw: string;
+}> {
+  const imageData =
+    imageDataUrl(
+      image,
+      contentType
+    );
+
+  const prompt = `
+Analyse this workplace photograph BEFORE performing a safety inspection.
+
+This is a Singapore shipping/container depot and container repair yard.
+
+Identify ONLY things that are visibly supported by the photograph.
+
+Do not guess.
+
+Do not infer hidden activities.
+
+Do not assume a worker exists if no worker is visible.
+
+Do not assume lifting, hot work, electrical work, confined-space work or work-at-height simply because the location is a depot.
+
+Return ONLY valid JSON.
+
+Use exactly:
+
+{
+  "scene_summary": "short factual description",
+  "visible_objects": [],
+  "visible_activities": [],
+  "visible_hazards": [],
+  "visible_controls": [],
+  "people_visible": false,
+  "vehicles_visible": false,
+  "machinery_visible": false,
+  "lifting_visible": false,
+  "hot_work_visible": false,
+  "electrical_visible": false,
+  "chemicals_visible": false,
+  "cylinders_visible": false,
+  "elevated_work_visible": false,
+  "storage_visible": false,
+  "relevant_categories": []
+}
+
+Examples of visible objects:
+
+worker
+hard hat
+high visibility vest
+forklift
+Hyster forklift
+reach stacker
+container
+oxygen cylinder
+gas cylinder cage
+welding machine
+grinder
+electrical cable
+fire extinguisher
+chemical container
+storage rack
+ladder
+platform
+vehicle
+truck
+
+Important:
+
+"visible_objects" must contain only objects actually visible.
+
+"visible_activities" must contain only activities actually visible.
+
+"visible_hazards" must contain only hazards actually visible.
+
+"relevant_categories" should contain safety categories that are genuinely relevant to the visible scene.
+
+Do NOT include categories merely because they exist in the safety checklist.
+`.trim();
+
+  let response: any;
+
+  try {
+    response =
+      await env.AI.run(
+        MODEL,
+        {
+          messages: [
+            {
+              role:
+                "system",
+
+              content:
+                "You are a strict visual scene-analysis assistant. Report only visible evidence.",
+            },
+
+            {
+              role:
+                "user",
+
+              content: [
+                {
+                  type:
+                    "text",
+
+                  text:
+                    prompt,
+                },
+
+                {
+                  type:
+                    "image",
+
+                  source: {
+                    type:
+                      "base64",
+
+                    media_type:
+                      contentType,
+
+                    data:
+                      arrayBufferToBase64(
+                        image
+                      ),
+                  },
+                },
+              ],
+            },
+          ],
+
+          max_tokens:
+            700,
+
+          temperature:
+            0.01,
+
+          top_p:
+            0.8,
+        } as any
+      );
+  } catch (error) {
+    throw new Error(
+      `Scene analysis failed: ${
+        error instanceof Error
+          ? error.message
+          : String(error)
+      }`
+    );
+  }
+
+  const raw =
+    typeof response ===
+      "string"
+      ? response
+      : typeof response?.response ===
+        "string"
+      ? response.response
+      : typeof response?.result ===
+        "string"
+      ? response.result
+      : "";
+
+  if (!raw.trim()) {
+    throw new Error(
+      "Scene analysis returned no text."
+    );
+  }
+
+  const parsed =
+    extractJsonObject(
+      raw
+    );
+
+  return {
+    scene:
+      normalizeScene(
+        parsed
+      ),
+
+    raw:
+      raw.trim(),
+  };
+}
+
+/* =========================================================
+   VECTORIZE EMBEDDINGS
+   ========================================================= */
+
+async function createEmbedding(
+  env: Env,
+  text: string
+): Promise<number[]> {
+  const response: any =
+    await env.AI.run(
+      EMBEDDING_MODEL,
+      {
+        text: [
+          text.substring(
+            0,
+            6000
+          ),
+        ],
+      } as any
+    );
+
+  const vector =
+    response?.data?.[0];
+
+  if (
+    !Array.isArray(vector) ||
+    vector.length !== 768
+  ) {
+    throw new Error(
+      `Embedding model returned an invalid vector. Expected 768 dimensions, received ${
+        Array.isArray(vector)
+          ? vector.length
+          : 0
+      }.`
+    );
+  }
+
+  return vector.map(
+    Number
+  );
+}
+
+function sceneSearchText(
+  scene: SceneAnalysis
+): string {
+  return [
+    `Scene: ${scene.scene_summary}`,
+
+    `Visible objects: ${scene.visible_objects.join(
+      ", "
+    )}`,
+
+    `Visible activities: ${scene.visible_activities.join(
+      ", "
+    )}`,
+
+    `Visible hazards: ${scene.visible_hazards.join(
+      ", "
+    )}`,
+
+    `Visible controls: ${scene.visible_controls.join(
+      ", "
+    )}`,
+
+    `People visible: ${scene.people_visible}`,
+
+    `Vehicles visible: ${scene.vehicles_visible}`,
+
+    `Machinery visible: ${scene.machinery_visible}`,
+
+    `Lifting visible: ${scene.lifting_visible}`,
+
+    `Hot work visible: ${scene.hot_work_visible}`,
+
+    `Electrical visible: ${scene.electrical_visible}`,
+
+    `Chemicals visible: ${scene.chemicals_visible}`,
+
+    `Cylinders visible: ${scene.cylinders_visible}`,
+
+    `Elevated work visible: ${scene.elevated_work_visible}`,
+
+    `Storage visible: ${scene.storage_visible}`,
+
+    `Relevant categories: ${scene.relevant_categories.join(
+      ", "
+    )}`,
+  ].join("\n");
+}
+
+/* =========================================================
+   VECTORIZE SEARCH
+   ========================================================= */
+
+async function retrieveRelevantChecks(
+  env: Env,
+  scene: SceneAnalysis
+): Promise<RetrievedCheck[]> {
+  if (!env.VECTORIZE) {
+    throw new Error(
+      "VECTORIZE binding is not configured."
+    );
+  }
+
+  const searchText =
+    sceneSearchText(
+      scene
+    );
+
+  const vector =
+    await createEmbedding(
+      env,
+      searchText
+    );
+
+  let result: any;
+
+  try {
+    result =
+      await (env.VECTORIZE as any)
+        .query(
+          vector,
+          {
+            topK:
+              MAX_RETRIEVED_CHECKS,
+
+            returnMetadata:
+              "all",
+          }
+        );
+  } catch (error) {
+    throw new Error(
+      `Vectorize query failed: ${
+        error instanceof Error
+          ? error.message
+          : String(error)
+      }`
+    );
+  }
+
+  const matches =
+    Array.isArray(
+      result?.matches
+    )
+      ? result.matches
+      : [];
+
+  const output: RetrievedCheck[] =
+    [];
+
+  for (
+    const match of matches
+  ) {
+    const score =
+      Number(
+        match?.score
+      );
+
+    if (
+      !Number.isFinite(
+        score
+      )
+    ) {
+      continue;
+    }
+
+    if (
+      score <
+      VECTOR_MATCH_THRESHOLD
+    ) {
+      continue;
+    }
+
+    const metadata =
+      match?.metadata ||
+      {};
+
+    const id =
+      clean(
+        match?.id ||
+          metadata.id,
+        200
+      );
+
+    if (!id) {
+      continue;
+    }
+
+    const check: SafetyCheck =
+      {
+        id,
+
+        category:
+          clean(
+            metadata.category,
+            200
+          ),
+
+        check_question:
+          clean(
+            metadata.check_question,
+            1000
+          ),
+
+        guidance:
+          clean(
+            metadata.guidance,
+            1500
+          ),
+
+        source_title:
+          clean(
+            metadata.source_title,
+            500
+          ),
+
+        source_url:
+          clean(
+            metadata.source_url,
+            1000
+          ),
+
+        keywords:
+          clean(
+            metadata.keywords,
+            1000
+          ),
+
+        source_type:
+          clean(
+            metadata.source_type,
+            100
+          ),
+      };
+
+    if (
+      !check.category ||
+      !check.check_question
+    ) {
+      continue;
+    }
+
+    output.push({
+      check,
+      score:
+        Math.round(
+          score * 1000
+        ) / 1000,
+    });
+  }
+
+  /*
+   * Remove duplicates.
+   */
+
+  const seen =
+    new Set<string>();
+
+  return output.filter(
+    item => {
+      if (
+        seen.has(
+          item.check.id
+        )
+      ) {
+        return false;
+      }
+
+      seen.add(
+        item.check.id
+      );
+
+      return true;
+    }
+  );
+}
+
+/* =========================================================
+   CATEGORY VISIBILITY VALIDATION
+   ========================================================= */
+
+function sceneText(
+  scene: SceneAnalysis
+): string {
+  return [
+    scene.scene_summary,
+
+    ...scene.visible_objects,
+
+    ...scene.visible_activities,
+
+    ...scene.visible_hazards,
+
+    ...scene.visible_controls,
+
+    ...scene.relevant_categories,
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function categoryVisible(
+  category: string,
+  scene: SceneAnalysis
+): boolean {
+  const c =
+    normalizeCategory(
+      category
+    );
+
+  const text =
+    sceneText(
+      scene
+    );
+
+  switch (c) {
+    case "PPE":
+      return (
+        scene.people_visible ||
+        text.includes("worker") ||
+        text.includes("ppe") ||
+        text.includes("hard hat") ||
+        text.includes("helmet") ||
+        text.includes(
+          "high visibility"
+        ) ||
+        text.includes(
+          "safety vest"
+        )
+      );
+
+    case "Housekeeping":
+      return true;
+
+    case "Vehicular Safety":
+      return (
+        scene.vehicles_visible ||
+        text.includes("vehicle") ||
+        text.includes("truck") ||
+        text.includes("forklift") ||
+        text.includes(
+          "reach stacker"
+        ) ||
+        text.includes("traffic")
+      );
+
+    case "Work at Height":
+      return (
+        scene.elevated_work_visible ||
+        text.includes("ladder") ||
+        text.includes("platform") ||
+        text.includes("elevated") ||
+        text.includes("height")
+      );
+
+    case "Lifting":
+      return (
+        scene.lifting_visible ||
+        text.includes("lifting") ||
+        text.includes(
+          "suspended load"
+        ) ||
+        text.includes("crane") ||
+        text.includes("spreader") ||
+        text.includes(
+          "container lifting"
+        )
+      );
+
+    case "Electrical Safety":
+      return (
+        scene.electrical_visible ||
+        text.includes("electrical") ||
+        text.includes("cable") ||
+        text.includes("plug") ||
+        text.includes("socket") ||
+        text.includes(
+          "welding machine"
+        )
+      );
+
+    case "Fire Safety":
+      return (
+        scene.hot_work_visible ||
+        text.includes("fire") ||
+        text.includes(
+          "fire extinguisher"
+        ) ||
+        text.includes(
+          "combustible"
+        ) ||
+        text.includes("flame") ||
+        text.includes(
+          "spark"
+        ) ||
+        text.includes(
+          "welding"
+        ) ||
+        text.includes(
+          "gas cylinder"
+        ) ||
+        scene.cylinders_visible
+      );
+
+    case "Chemical Safety":
+      return (
+        scene.chemicals_visible ||
+        scene.cylinders_visible ||
+        text.includes("chemical") ||
+        text.includes("oxygen") ||
+        text.includes(
+          "gas cylinder"
+        ) ||
+        text.includes(
+          "solvent"
+        ) ||
+        text.includes("paint") ||
+        text.includes(
+          "fuel"
+        )
+      );
+
+    case "Machinery Safety":
+      return (
+        scene.machinery_visible ||
+        text.includes(
+          "machine"
+        ) ||
+        text.includes(
+          "grinder"
+        ) ||
+        text.includes(
+          "cutting machine"
+        ) ||
+        text.includes(
+          "power tool"
+        ) ||
+        text.includes(
+          "forklift"
+        ) ||
+        text.includes(
+          "reach stacker"
+        )
+      );
+
+    case "Forklift Safety":
+      return (
+        text.includes(
+          "forklift"
+        ) ||
+        text.includes(
+          "hyster"
+        ) ||
+        text.includes(
+          "fork truck"
+        )
+      );
+
+    case "Reach Stacker Safety":
+      return (
+        text.includes(
+          "reach stacker"
+        ) ||
+        text.includes(
+          "container handler"
+        ) ||
+        text.includes(
+          "container stacker"
+        ) ||
+        text.includes(
+          "telescopic"
+        )
+      );
+
+    case "Hot Work":
+      return (
+        scene.hot_work_visible ||
+        text.includes(
+          "welding"
+        ) ||
+        text.includes(
+          "cutting"
+        ) ||
+        text.includes(
+          "grinding"
+        ) ||
+        text.includes(
+          "hot work"
+        ) ||
+        text.includes(
+          "sparks"
+        )
+      );
+
+    case "Confined Space":
+      return (
+        text.includes(
+          "confined space"
+        ) ||
+        text.includes(
+          "enclosed space"
+        ) ||
+        text.includes(
+          "container interior"
+        ) ||
+        text.includes(
+          "gas testing"
+        )
+      );
+
+    case "Noise":
+      return (
+        scene.machinery_visible ||
+        text.includes(
+          "grinding"
+        ) ||
+        text.includes(
+          "cutting"
+        ) ||
+        text.includes(
+          "impact tool"
+        ) ||
+        text.includes(
+          "noise"
+        )
+      );
+
+    case "Slips, Trips and Falls":
+      return (
+        true
+      );
+
+    case "Manual Handling":
+      return (
+        scene.people_visible ||
+        text.includes(
+          "manual handling"
+        ) ||
+        text.includes(
+          "carrying"
+        ) ||
+        text.includes(
+          "lifting"
+        )
+      );
+
+    case "Storage and Stacking":
+      return (
+        scene.storage_visible ||
+        text.includes(
+          "storage"
+        ) ||
+        text.includes(
+          "stack"
+        ) ||
+        text.includes(
+          "rack"
+        ) ||
+        text.includes(
+          "cage"
+        ) ||
+        scene.cylinders_visible
+      );
+
+    case "Risk Assessment":
+      /*
+       * Risk assessment is only relevant where
+       * a visible work activity exists.
+       */
+      return (
+        scene.visible_activities
+          .length > 0 ||
+        scene.machinery_visible ||
+        scene.vehicles_visible ||
+        scene.people_visible ||
+        scene.hot_work_visible ||
+        scene.lifting_visible
+      );
+
+    case "Loading and Unloading":
+      return (
+        text.includes(
+          "loading"
+        ) ||
+        text.includes(
+          "unloading"
+        ) ||
+        text.includes(
+          "cargo"
+        ) ||
+        text.includes(
+          "container"
+        ) ||
+        text.includes(
+          "trailer"
+        )
+      );
+
+    default:
+      return true;
+  }
+}
+
+/* =========================================================
+   AI PROMPT
+   ========================================================= */
+
+function buildFinalPrompt(
+  scene: SceneAnalysis,
+  retrieved: RetrievedCheck[]
+): string {
+  const checks =
+    retrieved
+      .map(
+        item =>
+          `
+CHECK ID: ${item.check.id}
+VECTOR SCORE: ${item.score}
+CATEGORY: ${item.check.category}
+QUESTION: ${item.check.check_question}
+GUIDANCE: ${item.check.guidance}
+SOURCE: ${item.check.source_title}
+URL: ${item.check.source_url}
+SOURCE TYPE: ${item.check.source_type || "WSHC_DERIVED"}
+`
+      )
+      .join("\n");
+
+  return `
+You are a strict workplace safety visual inspection assistant for a Singapore shipping/container depot and container repair yard.
+
+You have already been given a scene analysis produced from the photograph.
+
+SCENE ANALYSIS
+
+${sceneSearchText(scene)}
+
+RETRIEVED WSHC SAFETY CHECKS
+
+${checks}
+
+==================================================
+CRITICAL EVIDENCE RULES
+==================================================
+
+1. Analyse ONLY what is visibly supported by the photograph.
+
+2. A retrieved safety check does NOT automatically become a finding.
+
+3. Do NOT create a PASS simply because the check exists.
+
+4. Do NOT create a CHECK_REQUIRED simply because the check exists.
+
+5. There must be visible photographic evidence relevant to the category.
+
+6. If there is no visible evidence for a category, OMIT the category.
+
+7. Never invent workers, vehicles, lifting operations, welding, electrical work, confined-space entry, fire equipment, chemicals or hazards.
+
+8. Do NOT report negative observations such as:
+"No visible lifting operation"
+"No visible work at height"
+"No visible electrical equipment"
+"No visible fire hazards"
+"No visible storage"
+
+9. PASS means the visible condition appears satisfactory.
+
+10. FAIL means a visible unsafe condition is identified.
+
+11. CHECK_REQUIRED means a relevant visible condition exists, but the photograph does not provide enough evidence to determine compliance.
+
+12. Do not use CHECK_REQUIRED for something that is simply absent from the photograph.
+
+13. Confidence must reflect the visible photographic evidence.
+
+14. If a worker is NOT visible, do not create a PPE finding.
+
+15. If lifting is NOT visible, do not create a lifting finding.
+
+16. If a forklift is NOT visible, do not create a forklift finding.
+
+17. If a reach stacker/container handler is NOT visible, do not create a reach stacker finding.
+
+18. If hot work is NOT visible, do not create a hot-work finding.
+
+19. If electrical equipment is NOT visible, do not create an electrical finding.
+
+20. If a confined-space activity is NOT visible, do not create a confined-space finding.
+
+21. If elevated work is NOT visible, do not create a work-at-height finding.
+
+22. Do not use general depot knowledge as photographic evidence.
+
+==================================================
+OUTPUT FORMAT
+==================================================
+
+Return ONLY findings.
+
+For each relevant visible finding use exactly:
+
+**CATEGORY**
+
+* **Title:** short title
+* **Observation:** factual visible observation
+* **Evidence:** what is visibly supporting the finding
+* **Status:** PASS
+* **Risk:** LOW
+* **Confidence:** 0.90
+* **Check ID:** check-id
+
+Example:
+
+**Storage and Stacking**
+
+* **Title:** Oxygen cylinders stored in secured cage
+* **Observation:** Oxygen cylinders are visibly stored inside a metal storage cage.
+* **Evidence:** Multiple oxygen cylinders and a metal cylinder cage are clearly visible.
+* **Status:** PASS
+* **Risk:** LOW
+* **Confidence:** 0.91
+* **Check ID:** storage-001
+
+Do NOT add an explanation before or after the findings.
+
+If there are no valid visible safety findings, return:
+
+NO_VALID_VISIBLE_FINDINGS
+`.trim();
+}
+
+/* =========================================================
+   FINAL AI
+   ========================================================= */
+
+async function runFinalAI(
+  env: Env,
+  image: ArrayBuffer,
+  contentType: string,
+  scene: SceneAnalysis,
+  retrieved: RetrievedCheck[]
+): Promise<{
+  raw: string;
+  result: any;
+}> {
+  if (
+    retrieved.length === 0
+  ) {
+    return {
+      raw:
+        "NO_VALID_VISIBLE_FINDINGS",
+
+      result: null,
+    };
+  }
+
+  const prompt =
+    buildFinalPrompt(
+      scene,
+      retrieved
+    );
+
+  const imageBase64 =
+    arrayBufferToBase64(
+      image
+    );
+
+  let response: any;
+
+  try {
+    response =
+      await env.AI.run(
+        MODEL,
+        {
+          messages: [
+            {
+              role:
+                "system",
+
+              content:
+                "You are a strict evidence-based Singapore workplace safety visual inspection assistant. Never invent objects, people, hazards or activities.",
+            },
+
+            {
+              role:
+                "user",
+
+              content: [
+                {
+                  type:
+                    "text",
+
+                  text:
+                    prompt,
+                },
+
+                {
+                  type:
+                    "image",
+
+                  source: {
+                    type:
+                      "base64",
+
+                    media_type:
+                      contentType,
+
+                    data:
+                      imageBase64,
+                  },
+                },
+              ],
+            },
+          ],
+
+          max_tokens:
+            1000,
+
+          temperature:
+            0.01,
+
+          top_p:
+            0.8,
+        } as any
+      );
+  } catch (error) {
+    throw new Error(
+      `Final Workers AI request failed: ${
+        error instanceof Error
+          ? error.message
+          : String(error)
+      }`
+    );
+  }
+
+  const raw =
+    typeof response ===
+      "string"
+      ? response
+      : typeof response?.response ===
+        "string"
+      ? response.response
+      : typeof response?.result ===
+        "string"
+      ? response.result
+      : "";
+
+  if (!raw.trim()) {
+    throw new Error(
+      "Final Workers AI returned no text."
+    );
+  }
+
+  return {
+    raw:
+      raw.trim(),
+
+    result:
+      response,
+  };
+}
+
+/* =========================================================
+   CONFIDENCE / STATUS / RISK
+   ========================================================= */
+
+function parseConfidence(
+  value: string
+): number {
+  if (!value) {
+    return 0.6;
+  }
+
+  const match =
+    value.match(
+      /(\d+(?:\.\d+)?)/
+    );
+
+  if (!match) {
+    return 0.6;
+  }
+
+  let number =
+    Number(
+      match[1]
+    );
+
+  if (
+    !Number.isFinite(
+      number
+    )
+  ) {
+    return 0.6;
+  }
+
+  if (
+    number > 1
+  ) {
+    number /=
+      100;
+  }
+
+  return (
+    Math.round(
+      Math.max(
+        0,
+        Math.min(
+          1,
+          number
+        )
+      ) * 100
+    ) / 100
+  );
+}
+
+function normalizeStatus(
+  value: string,
+  observation: string
+): Status {
+  const text =
+    cleanMarkdown(
+      value
+    ).toUpperCase();
+
+  if (
+    text.includes(
+      "FAIL"
+    )
+  ) {
+    return "FAIL";
+  }
+
+  if (
+    text.includes(
+      "PASS"
+    )
+  ) {
+    return "PASS";
+  }
+
+  if (
+    text.includes(
+      "CHECK"
+    )
+  ) {
+    return "CHECK_REQUIRED";
+  }
+
+  const lower =
+    observation.toLowerCase();
+
+  const failureWords = [
+    "unsafe",
+    "hazard",
+    "spill",
+    "obstructed",
+    "blocked",
+    "missing",
+    "damaged",
+    "exposed",
+    "unguarded",
+  ];
+
+  if (
+    failureWords.some(
+      word =>
+        lower.includes(
+          word
+        )
+    )
+  ) {
+    return "FAIL";
+  }
+
+  return "CHECK_REQUIRED";
+}
+
+function normalizeRisk(
+  value: string,
+  status: Status
+): Risk {
+  const text =
+    cleanMarkdown(
+      value
+    ).toUpperCase();
+
+  if (
+    text.includes(
+      "HIGH"
+    )
+  ) {
+    return "HIGH";
+  }
+
+  if (
+    text.includes(
+      "MEDIUM"
+    )
+  ) {
+    return "MEDIUM";
+  }
+
+  if (
+    text.includes(
+      "LOW"
+    )
+  ) {
+    return "LOW";
+  }
+
+  if (
+    status ===
+    "FAIL"
+  ) {
+    return "HIGH";
+  }
+
+  if (
+    status ===
+    "PASS"
+  ) {
+    return "LOW";
+  }
+
+  return "MEDIUM";
+}
+
+/* =========================================================
+   NEGATIVE VISIBILITY FILTER
+   ========================================================= */
+
+function isNegativeVisibilityFinding(
+  category: string,
+  title: string,
+  observation: string
+): boolean {
+  const text =
+    `${category} ${title} ${observation}`
+      .toLowerCase()
+      .replace(
+        /\s+/g,
+        " "
+      );
+
+  const negativePatterns = [
+    "no visible",
+    "not visible",
+    "there is no visible",
+    "no evidence",
+    "cannot be determined",
+    "not observed",
+    "not apparent",
+    "no visible work at height",
+    "no visible lifting",
+    "no visible lifting operation",
+    "no visible electrical",
+    "no visible fire",
+    "no visible storage",
+    "no work at height",
+    "no lifting operation",
+    "no electrical equipment",
+    "no fire hazards",
+    "no storage hazards",
+  ];
+
+  return negativePatterns.some(
+    pattern =>
+      text.includes(
+        pattern
+      )
+  );
+}
+
+/* =========================================================
+   CATEGORY NORMALIZATION
+   ========================================================= */
+
+function normalizeCategory(
+  category: string
+): string {
+  const value =
+    cleanMarkdown(
+      category,
+      100
+    )
+      .replace(
+        /\s+/g,
+        " "
+      )
+      .trim();
+
+  const lower =
+    value.toLowerCase();
+
+  if (
+    lower === "ppe" ||
+    lower.includes(
+      "personal protective"
+    )
+  ) {
+    return "PPE";
+  }
+
+  if (
+    lower.includes(
+      "housekeeping"
+    )
+  ) {
+    return "Housekeeping";
+  }
+
+  if (
+    lower.includes(
+      "vehicular"
+    ) ||
+    lower.includes(
+      "vehicle"
+    ) ||
+    lower.includes(
+      "traffic"
+    )
+  ) {
+    return "Vehicular Safety";
+  }
+
+  if (
+    lower.includes(
+      "work at height"
+    ) ||
+    lower.includes(
+      "working at height"
+    )
+  ) {
+    return "Work at Height";
+  }
+
+  if (
+    lower.includes(
+      "lifting"
+    )
+  ) {
+    return "Lifting";
+  }
+
+  if (
+    lower.includes(
+      "electrical"
+    )
+  ) {
+    return "Electrical Safety";
+  }
+
+  if (
+    lower.includes(
+      "fire"
+    )
+  ) {
+    return "Fire Safety";
+  }
+
+  if (
+    lower.includes(
+      "storage"
+    )
+  ) {
+    return "Storage and Stacking";
+  }
+
+  if (
+    lower.includes(
+      "forklift"
+    )
+  ) {
+    return "Forklift Safety";
+  }
+
+  if (
+    lower.includes(
+      "reach stacker"
+    ) ||
+    lower.includes(
+      "container handler"
+    )
+  ) {
+    return "Reach Stacker Safety";
+  }
+
+  if (
+    lower.includes(
+      "hot work"
+    )
+  ) {
+    return "Hot Work";
+  }
+
+  if (
+    lower.includes(
+      "machinery"
+    ) ||
+    lower.includes(
+      "machine safety"
+    )
+  ) {
+    return "Machinery Safety";
+  }
+
+  if (
+    lower.includes(
+      "chemical"
+    )
+  ) {
+    return "Chemical Safety";
+  }
+
+  if (
+    lower.includes(
+      "confined"
+    )
+  ) {
+    return "Confined Space";
+  }
+
+  if (
+    lower.includes(
+      "noise"
+    )
+  ) {
+    return "Noise";
+  }
+
+  if (
+    lower.includes(
+      "slip"
+    ) ||
+    lower.includes(
+      "trip"
+    )
+  ) {
+    return "Slips, Trips and Falls";
+  }
+
+  if (
+    lower.includes(
+      "manual handling"
+    ) ||
+    lower.includes(
+      "ergonomic"
+    )
+  ) {
+    return "Manual Handling";
+  }
+
+  if (
+    lower.includes(
+      "risk assessment"
+    ) ||
+    lower ===
+      "risk assessment"
+  ) {
+    return "Risk Assessment";
+  }
+
+  if (
+    lower.includes(
+      "loading"
+    ) ||
+    lower.includes(
+      "unloading"
+    )
+  ) {
+    return "Loading and Unloading";
+  }
+
+  return value;
+}
+
+/* =========================================================
+   AI RESPONSE PARSER
+   ========================================================= */
+
+function parseAIResponse(
+  raw: string
+): Array<{
+  category: string;
+  title: string;
+  observation: string;
+  evidence: string;
+  status: Status;
+  risk: Risk;
+  confidence: number;
+  checkId: string;
+}> {
+  const results: Array<{
+    category: string;
+    title: string;
+    observation: string;
+    evidence: string;
+    status: Status;
+    risk: Risk;
+    confidence: number;
+    checkId: string;
+  }> = [];
+
+  if (
+    raw
+      .trim()
+      .toUpperCase() ===
+    "NO_VALID_VISIBLE_FINDINGS"
+  ) {
+    return [];
+  }
+
+  const text =
+    raw
+      .replace(
+        /\r/g,
+        ""
+      )
+      .trim();
+
+  const headingRegex =
+    /(?:^|\n)\s*\*\*([^*\n]+)\*\*\s*(?=\n)/g;
+
+  const headings: Array<{
+    index: number;
+    category: string;
+  }> = [];
+
+  let match:
+    RegExpExecArray | null;
+
+  while (
+    (match =
+      headingRegex.exec(
+        text
+      )) !== null
+  ) {
+    const category =
+      cleanMarkdown(
+        match[1]
+      );
+
+    if (
+      category &&
+      ![
+        "Title",
+        "Observation",
+        "Evidence",
+        "Status",
+        "Risk",
+        "Confidence",
+        "Check ID",
+        "Category",
+      ].includes(
+        category
+      )
+    ) {
+      headings.push({
+        index:
+          match.index,
+
+        category,
+      });
+    }
+  }
+
+  for (
+    let i = 0;
+    i < headings.length;
+    i++
+  ) {
+    const start =
+      headings[i].index;
+
+    const end =
+      i + 1 <
+      headings.length
+        ? headings[i + 1]
+            .index
+        : text.length;
+
+    const body =
+      text.substring(
+        start,
+        end
+      );
+
+    const category =
+      normalizeCategory(
+        headings[i].category
+      );
+
+    const titleMatch =
+      body.match(
+        /(?:^|\n)\s*(?:\*\s*)?\*\*Title:\*\*\s*(.+?)(?=\n|$)/i
+      );
+
+    const observationMatch =
+      body.match(
+        /(?:^|\n)\s*(?:\*\s*)?\*\*Observation:\*\*\s*(.+?)(?=\n|$)/i
+      );
+
+    const evidenceMatch =
+      body.match(
+        /(?:^|\n)\s*(?:\*\s*)?\*\*Evidence:\*\*\s*(.+?)(?=\n|$)/i
+      );
+
+    const statusMatch =
+      body.match(
+        /(?:^|\n)\s*(?:\*\s*)?\*\*Status:\*\*\s*(PASS|FAIL|CHECK_REQUIRED)/i
+      );
+
+    const riskMatch =
+      body.match(
+        /(?:^|\n)\s*(?:\*\s*)?\*\*Risk:\*\*\s*(LOW|MEDIUM|HIGH)/i
+      );
+
+    const confidenceMatch =
+      body.match(
+        /(?:^|\n)\s*(?:\*\s*)?\*\*Confidence:\*\*\s*([0-9.]+)/i
+      );
+
+    const checkIdMatch =
+      body.match(
+        /(?:^|\n)\s*(?:\*\s*)?\*\*Check ID:\*\*\s*([^\s\n]+)/i
+      );
+
+    const title =
+      cleanMarkdown(
+        titleMatch?.[1] ||
+          `${category} observation`
+      );
+
+    const observation =
+      cleanMarkdown(
+        observationMatch?.[1] ||
+          ""
+      );
+
+    const evidence =
+      cleanMarkdown(
+        evidenceMatch?.[1] ||
+          ""
+      );
+
+    if (
+      !observation
+    ) {
+      continue;
+    }
+
+    if (
+      isNegativeVisibilityFinding(
+        category,
+        title,
+        observation
+      )
+    ) {
+      continue;
+    }
+
+    const status =
+      normalizeStatus(
+        statusMatch?.[1] ||
+          "",
+        observation
+      );
+
+    const risk =
+      normalizeRisk(
+        riskMatch?.[1] ||
+          "",
+        status
+      );
+
+    const confidence =
+      parseConfidence(
+        confidenceMatch?.[1] ||
+          ""
+      );
+
+    const checkId =
+      cleanMarkdown(
+        checkIdMatch?.[1] ||
+          ""
+      );
+
+    results.push({
+      category,
+      title,
+      observation,
+
+      evidence:
+        evidence ||
+        observation,
+
+      status,
+
+      risk,
+
+      confidence,
+
+      checkId,
+    });
+
+    if (
+      results.length >=
+      MAX_FINDINGS
+    ) {
+      break;
+    }
+  }
+
+  if (
+    results.length === 0
+  ) {
+    return parseLegacyAIResponse(
+      raw
+    );
+  }
+
+  return results;
+}
+
+/* =========================================================
+   LEGACY PARSER
+   ========================================================= */
+
+function parseLegacyAIResponse(
+  raw: string
+): Array<{
+  category: string;
+  title: string;
+  observation: string;
+  evidence: string;
+  status: Status;
+  risk: Risk;
+  confidence: number;
+  checkId: string;
+}> {
+  const results: Array<{
+    category: string;
+    title: string;
+    observation: string;
+    evidence: string;
+    status: Status;
+    risk: Risk;
+    confidence: number;
+    checkId: string;
+  }> = [];
+
+  const blocks =
+    raw.split(
+      /(?=\*\*Category:\*\*)/i
+    );
+
+  for (
+    const block of blocks
+  ) {
+    if (
+      !block.trim()
+    ) {
+      continue;
+    }
+
+    const categoryMatch =
+      block.match(
+        /\*\*Category:\*\*\s*(.+?)(?=\n|$)/i
+      );
+
+    if (
+      !categoryMatch
+    ) {
+      continue;
+    }
+
+    const category =
+      normalizeCategory(
+        categoryMatch[1]
+      );
+
+    const titleMatch =
+      block.match(
+        /\*\*Title:\*\*\s*(.+?)(?=\n|$)/i
+      );
+
+    const observationMatch =
+      block.match(
+        /\*\*Observation:\*\*\s*(.+?)(?=\n|$)/i
+      );
+
+    const evidenceMatch =
+      block.match(
+        /\*\*Evidence:\*\*\s*(.+?)(?=\n|$)/i
+      );
+
+    const statusMatch =
+      block.match(
+        /\*\*Status:\*\*\s*(PASS|FAIL|CHECK_REQUIRED)/i
+      );
+
+    const riskMatch =
+      block.match(
+        /\*\*Risk:\*\*\s*(LOW|MEDIUM|HIGH)/i
+      );
+
+    const confidenceMatch =
+      block.match(
+        /\*\*Confidence:\*\*\s*([0-9.]+)/i
+      );
+
+    const checkIdMatch =
+      block.match(
+        /\*\*Check ID:\*\*\s*([^\s\n]+)/i
+      );
+
+    const title =
+      cleanMarkdown(
+        titleMatch?.[1] ||
+          `${category} observation`
+      );
+
+    const observation =
+      cleanMarkdown(
+        observationMatch?.[1] ||
+          ""
+      );
+
+    const evidence =
+      cleanMarkdown(
+        evidenceMatch?.[1] ||
+          observation
+      );
+
+    if (
+      !observation
+    ) {
+      continue;
+    }
+
+    if (
+      isNegativeVisibilityFinding(
+        category,
+        title,
+        observation
+      )
+    ) {
+      continue;
+    }
+
+    const status =
+      normalizeStatus(
+        statusMatch?.[1] ||
+          "",
+        observation
+      );
+
+    results.push({
+      category,
+      title,
+      observation,
+      evidence,
+      status,
+
+      risk:
+        normalizeRisk(
+          riskMatch?.[1] ||
+            "",
+          status
+        ),
+
+      confidence:
+        parseConfidence(
+          confidenceMatch?.[1] ||
+            ""
+        ),
+
+      checkId:
+        cleanMarkdown(
+          checkIdMatch?.[1] ||
+            ""
+        ),
+    });
+
+    if (
+      results.length >=
+      MAX_FINDINGS
+    ) {
+      break;
+    }
+  }
+
+  return results;
+}
+
+/* =========================================================
+   CHECK MATCHING
+   ========================================================= */
+
+function findCheck(
+  finding: {
+    category: string;
+    title: string;
+    observation: string;
+    checkId: string;
+  },
+  checks: SafetyCheck[]
+): SafetyCheck | null {
+  if (
+    finding.checkId
+  ) {
+    const exact =
+      checks.find(
+        check =>
+          check.id ===
+          finding.checkId
+      );
+
+    if (exact) {
+      return exact;
+    }
+  }
+
+  const category =
+    normalizeCategory(
+      finding.category
+    );
+
+  const categoryMatches =
+    checks.filter(
+      check =>
+        normalizeCategory(
+          check.category
+        ).toLowerCase() ===
+        category.toLowerCase()
+    );
+
+  if (
+    categoryMatches.length ===
+    1
+  ) {
+    return categoryMatches[0];
+  }
+
+  const combined =
+    `${category} ${finding.title} ${finding.observation}`
+      .toLowerCase();
+
+  let best:
+    SafetyCheck | null =
+      null;
+
+  let bestScore = 0;
+
+  const candidates =
+    categoryMatches.length
+      ? categoryMatches
+      : checks;
+
+  for (
+    const check of candidates
+  ) {
+    const keywordText =
+      clean(
+        check.keywords,
+        1000
+      ).toLowerCase();
+
+    const keywords =
+      keywordText
+        .split(
+          /[,;|]+/
+        )
+        .map(
+          word =>
+            word.trim()
+        )
+        .filter(
+          word =>
+            word.length >= 3
+        );
+
+    let score = 0;
+
+    for (
+      const keyword of keywords
+    ) {
+      if (
+        combined.includes(
+          keyword
+        )
+      ) {
+        score++;
+      }
+    }
+
+    if (
+      score >
+      bestScore
+    ) {
+      bestScore =
+        score;
+
+      best =
+        check;
+    }
+  }
+
+  return bestScore > 0
+    ? best
+    : null;
+}
+
+/* =========================================================
+   FINDING EVIDENCE VALIDATION
+   ========================================================= */
+
+function evidenceLooksValid(
+  item: {
+    category: string;
+    title: string;
+    observation: string;
+    evidence: string;
+  },
+  scene: SceneAnalysis
+): boolean {
+  if (
+    !item.observation ||
+    !item.evidence
+  ) {
+    return false;
+  }
+
+  if (
+    isNegativeVisibilityFinding(
+      item.category,
+      item.title,
+      item.observation
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    !categoryVisible(
+      item.category,
+      scene
+    )
+  ) {
+    return false;
+  }
+
+  /*
+   * Prevent obvious hallucination of a worker.
+   */
+
+  const combined =
+    `${item.title} ${item.observation} ${item.evidence}`
+      .toLowerCase();
+
+  const workerClaims = [
+    "worker",
+    "operator",
+    "person",
+    "employee",
+    "wearing",
+    "hard hat",
+    "helmet",
+    "high-visibility vest",
+  ];
+
+  if (
+    !scene.people_visible &&
+    workerClaims.some(
+      word =>
+        combined.includes(
+          word
+        )
+    )
+  ) {
+    return false;
+  }
+
+  /*
+   * Prevent false lifting findings.
+   */
+
+  if (
+    !scene.lifting_visible &&
+    (
+      item.category ===
+        "Lifting" ||
+      combined.includes(
+        "suspended load"
+      ) ||
+      combined.includes(
+        "lifting operation"
+      )
+    )
+  ) {
+    return false;
+  }
+
+  /*
+   * Prevent false forklift findings.
+   */
+
+  if (
+    !scene.vehicles_visible &&
+    (
+      item.category ===
+        "Forklift Safety" ||
+      combined.includes(
+        "forklift"
+      ) ||
+      combined.includes(
+        "hyster"
+      )
+    )
+  ) {
+    return false;
+  }
+
+  /*
+   * Prevent false reach-stacker findings.
+   */
+
+  if (
+    !scene.vehicles_visible &&
+    (
+      item.category ===
+        "Reach Stacker Safety" ||
+      combined.includes(
+        "reach stacker"
+      ) ||
+      combined.includes(
+        "container handler"
+      )
+    )
+  ) {
+    return false;
+  }
+
+  /*
+   * Prevent false hot-work findings.
+   */
+
+  if (
+    !scene.hot_work_visible &&
+    (
+      item.category ===
+        "Hot Work" ||
+      combined.includes(
+        "welding"
+      ) ||
+      combined.includes(
+        "grinding"
+      ) ||
+      combined.includes(
+        "hot work"
+      )
+    )
+  ) {
+    return false;
+  }
+
+  /*
+   * Prevent false electrical findings.
+   */
+
+  if (
+    !scene.electrical_visible &&
+    item.category ===
+      "Electrical Safety"
+  ) {
+    return false;
+  }
+
+  /*
+   * Prevent false work-at-height findings.
+   */
+
+  if (
+    !scene.elevated_work_visible &&
+    item.category ===
+      "Work at Height"
+  ) {
+    return false;
+  }
+
+  /*
+   * Prevent false confined-space findings.
+   */
+
+  if (
+    item.category ===
+      "Confined Space" &&
+    !combined.includes(
+      "confined"
+    ) &&
+    !combined.includes(
+      "enclosed"
+    ) &&
+    !combined.includes(
+      "container interior"
+    )
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+/* =========================================================
+   NORMALIZE FINDINGS
+   ========================================================= */
+
+function normalizeFindings(
+  parsed: Array<{
+    category: string;
+    title: string;
+    observation: string;
+    evidence: string;
+    status: Status;
+    risk: Risk;
+    confidence: number;
+    checkId: string;
+  }>,
+  checks: SafetyCheck[],
+  scene: SceneAnalysis
+): Finding[] {
+  const output: Finding[] =
+    [];
+
+  const seen =
+    new Set<string>();
+
+  for (
+    const item of parsed
+  ) {
+    const category =
+      normalizeCategory(
+        item.category
+      );
+
+    const title =
+      cleanMarkdown(
+        item.title,
+        250
+      );
+
+    const observation =
+      cleanMarkdown(
+        item.observation,
+        1200
+      );
+
+    const evidence =
+      cleanMarkdown(
+        item.evidence,
+        1000
+      );
+
+    if (
+      !category ||
+      !observation ||
+      !evidence
+    ) {
+      continue;
+    }
+
+    if (
+      !evidenceLooksValid(
+        {
+          category,
+          title,
+          observation,
+          evidence,
+        },
+        scene
+      )
+    ) {
+      continue;
+    }
+
+    const key =
+      `${category}|${title}|${observation}`
+        .toLowerCase()
+        .replace(
+          /\s+/g,
+          " "
+        );
+
+    if (
+      seen.has(key)
+    ) {
+      continue;
+    }
+
+    seen.add(key);
+
+    const check =
+      findCheck(
+        {
+          category,
+          title,
+          observation,
+          checkId:
+            item.checkId,
+        },
+        checks
+      );
+
+    /*
+     * Only accept a finding when it maps to
+     * one of the retrieved/current safety checks.
+     */
+
+    if (!check) {
+      continue;
+    }
+
+    let confidence =
+      Number(
+        item.confidence
+      );
+
+    if (
+      !Number.isFinite(
+        confidence
+      )
+    ) {
+      confidence = 0.6;
+    }
+
+    confidence =
+      Math.max(
+        0,
+        Math.min(
+          1,
+          confidence
+        )
+      );
+
+    output.push({
+      category,
+
+      title,
+
+      observation,
+
+      evidence,
+
+      status:
+        item.status,
+
+      risk_level:
+        item.risk,
+
+      confidence:
+        Math.round(
+          confidence * 100
+        ) / 100,
+
+      check_id:
+        check.id,
+
+      source_title:
+        check.source_title ||
+        null,
+
+      source_url:
+        check.source_url ||
+        null,
+    });
+
+    if (
+      output.length >=
+      MAX_FINDINGS
+    ) {
+      break;
+    }
+  }
+
+  return output;
+}
+
+/* =========================================================
+   OVERALL RESULT
+   ========================================================= */
+
+function overall(
+  findings: Finding[]
+):
+  | "PASS"
+  | "ATTENTION"
+  | "CHECK_REQUIRED" {
+  if (
+    findings.length ===
+    0
+  ) {
+    return "CHECK_REQUIRED";
+  }
+
+  if (
+    findings.some(
+      finding =>
+        finding.status ===
+        "FAIL"
+    )
+  ) {
+    return "ATTENTION";
+  }
+
+  if (
+    findings.some(
+      finding =>
+        finding.status ===
+        "CHECK_REQUIRED"
+    )
+  ) {
+    return "CHECK_REQUIRED";
+  }
+
+  return "PASS";
+}
+
+function buildSummary(
+  findings: Finding[]
+): string {
+  if (
+    findings.length ===
+    0
+  ) {
+    return "No valid visible safety conditions were identified from the photograph.";
+  }
+
+  const pass =
+    findings.filter(
+      finding =>
+        finding.status ===
+        "PASS"
+    ).length;
+
+  const fail =
+    findings.filter(
+      finding =>
+        finding.status ===
+        "FAIL"
+    ).length;
+
+  const check =
+    findings.filter(
+      finding =>
+        finding.status ===
+        "CHECK_REQUIRED"
+    ).length;
+
+  if (
+    fail > 0
+  ) {
+    return `${fail} visible safety finding(s) require corrective attention. ${check} item(s) require verification and ${pass} item(s) passed.`;
+  }
+
+  if (
+    check > 0
+  ) {
+    return `${check} visible safety item(s) require verification. ${pass} item(s) passed.`;
+  }
+
+  return `${pass} visible safety item(s) were assessed as PASS.`;
+}
+
+/* =========================================================
+   INSERT INSPECTION
+   ========================================================= */
+
+async function insertInspection(
+  env: Env,
+  id: string,
+  inspectionNo: string,
+  location: string,
+  inspector: string,
+  createdAt: string
+): Promise<void> {
+  const columns =
+    await getTableColumns(
+      env.SAFETY_DB,
+      "inspections"
+    );
+
+  const values: Record<
+    string,
+    unknown
+  > = {
+    id,
+
+    inspection_no:
+      inspectionNo,
+
+    location:
+      location || null,
+
+    inspector:
+      inspector || null,
+
+    created_at:
+      createdAt,
+
+    overall_result:
+      "CHECK_REQUIRED",
+  };
+
+  const insert =
+    buildInsert(
+      "inspections",
+      columns,
+      values
+    );
+
+  await env.SAFETY_DB
+    .prepare(insert.sql)
+    .bind(
+      ...insert.params
+    )
+    .run();
+}
+
+/* =========================================================
+   INSERT PHOTO
+   ========================================================= */
+
+async function insertPhoto(
+  env: Env,
+  photoId: string,
+  inspectionId: string,
+  objectKey: string,
+  fileName: string,
+  contentType: string,
+  createdAt: string
+): Promise<void> {
+  const columns =
+    await getTableColumns(
+      env.SAFETY_DB,
+      "inspection_photos"
+    );
+
+  if (
+    !columns.has(
+      "object_key"
+    )
+  ) {
+    throw new Error(
+      "inspection_photos.object_key column does not exist."
+    );
+  }
+
+  const values: Record<
+    string,
+    unknown
+  > = {
+    id:
+      photoId,
+
+    inspection_id:
+      inspectionId,
+
+    object_key:
+      objectKey,
+
+    file_name:
+      fileName,
+
+    content_type:
+      contentType,
+
+    created_at:
+      createdAt,
+  };
+
+  const insert =
+    buildInsert(
+      "inspection_photos",
+      columns,
+      values
+    );
+
+  await env.SAFETY_DB
+    .prepare(insert.sql)
+    .bind(
+      ...insert.params
+    )
+    .run();
+}
+
+/* =========================================================
+   INSERT INSPECTION ITEMS
+   ========================================================= */
+
+async function insertInspectionItems(
+  env: Env,
+  inspectionId: string,
+  photoId: string,
+  findings: Finding[]
+): Promise<void> {
+  if (
+    findings.length ===
+    0
+  ) {
+    return;
+  }
+
+  const columns =
+    await getTableColumns(
+      env.SAFETY_DB,
+      "inspection_items"
+    );
+
+  const statements =
+    findings.map(
+      finding => {
+        const values: Record<
+          string,
+          unknown
+        > = {
+          id:
+            uuid(),
+
+          inspection_id:
+            inspectionId,
+
+          photo_id:
+            photoId,
+
+          category:
+            finding.category,
+
+          title:
+            finding.title,
+
+          observation:
+            finding.observation,
+
+          /*
+           * Added only when the database
+           * has the evidence column.
+           */
+
+          evidence:
+            finding.evidence,
+
+          status:
+            finding.status,
+
+          risk_level:
+            finding.risk_level,
+
+          confidence:
+            finding.confidence,
+
+          check_id:
+            finding.check_id,
+
+          source_title:
+            finding.source_title,
+
+          source_url:
+            finding.source_url,
+
+          created_at:
+            nowISO(),
+        };
+
+        const insert =
+          buildInsert(
+            "inspection_items",
+            columns,
+            values
+          );
+
+        return env.SAFETY_DB
+          .prepare(insert.sql)
+          .bind(
+            ...insert.params
+          );
+      }
+    );
+
+  await env.SAFETY_DB.batch(
+    statements
+  );
+}
+
+/* =========================================================
+   UPDATE INSPECTION
+   ========================================================= */
+
+async function updateInspection(
+  env: Env,
+  inspectionId: string,
+  result:
+    | "PASS"
+    | "ATTENTION"
+    | "CHECK_REQUIRED"
+): Promise<void> {
+  const columns =
+    await getTableColumns(
+      env.SAFETY_DB,
+      "inspections"
+    );
+
+  if (
+    !columns.has(
+      "overall_result"
+    )
+  ) {
+    return;
+  }
+
+  await env.SAFETY_DB
+    .prepare(
+      `
+      UPDATE inspections
+      SET overall_result = ?
+      WHERE id = ?
+      `
+    )
+    .bind(
+      result,
+      inspectionId
+    )
+    .run();
+}
+
+/* =========================================================
+   R2 UPLOAD
+   ========================================================= */
+
+async function uploadToR2(
+  env: Env,
+  objectKey: string,
+  photo: PhotoInput,
+  metadata: {
+    inspectionId: string;
+    photoId: string;
+    inspectionNo: string;
+  }
+): Promise<void> {
+  try {
+    await env.PHOTOS.put(
+      objectKey,
+      photo.bytes,
+      {
+        httpMetadata: {
+          contentType:
+            photo.contentType,
+
+          contentDisposition:
+            `inline; filename="${photo.fileName}"`,
+        },
+
+        customMetadata: {
+          inspectionId:
+            metadata.inspectionId,
+
+          photoId:
+            metadata.photoId,
+
+          inspectionNo:
+            metadata.inspectionNo,
+        },
+      }
+    );
+  } catch (error) {
+    throw new Error(
+      `R2 upload failed: ${
+        error instanceof Error
+          ? error.message
+          : String(error)
+      }`
+    );
+  }
+}
+
+/* =========================================================
+   VECTORIZE SEED
+   ========================================================= */
+
+async function seedVectorize(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  const configuredKey =
+    env.VECTORIZE_SEED_KEY;
+
+  if (
+    !configuredKey
+  ) {
+    return jsonResponse(
+      {
+        ok: false,
+
+        error:
+          "VECTORIZE_SEED_KEY is not configured. Create this Worker secret before running the seed operation.",
+      },
+      500
+    );
+  }
+
+  const suppliedKey =
+    request.headers.get(
+      "X-Vectorize-Seed-Key"
+    );
+
+  if (
+    !suppliedKey ||
+    suppliedKey !==
+      configuredKey
+  ) {
+    return jsonResponse(
+      {
+        ok: false,
+
+        error:
+          "Invalid Vectorize seed key.",
+      },
+      401
+    );
+  }
+
+  try {
+    const checks =
+      await loadSafetyChecks(
+        env
+      );
+
+    if (
+      checks.length ===
+      0
+    ) {
+      return jsonResponse(
+        {
+          ok: false,
+
+          error:
+            "No active safety checks were found.",
+        },
+        400
+      );
+    }
+
+    const vectors: any[] =
+      [];
+
+    for (
+      const check of checks
+    ) {
+      const text =
+        [
+          `Safety category: ${check.category}`,
+
+          `Check question: ${check.check_question}`,
+
+          `Guidance: ${check.guidance}`,
+
+          `Keywords: ${check.keywords}`,
+
+          `Source: ${check.source_title}`,
+
+          `Source type: ${
+            check.source_type ||
+            "WSHC_DERIVED"
+          }`,
+        ].join("\n");
+
+      const values =
+        await createEmbedding(
+          env,
+          text
+        );
+
+      vectors.push({
+        id:
+          check.id,
+
+        values,
+
+        metadata: {
+          id:
+            check.id,
+
+          category:
+            check.category,
+
+          check_question:
+            check.check_question,
+
+          guidance:
+            check.guidance,
+
+          source_title:
+            check.source_title,
+
+          source_url:
+            check.source_url,
+
+          keywords:
+            check.keywords,
+
+          source_type:
+            check.source_type ||
+            "WSHC_DERIVED",
+        },
+      });
+    }
+
+    /*
+     * Vectorize supports batches.
+     * 22 checks is comfortably within
+     * the normal batch size.
+     */
+
+    await (env.VECTORIZE as any)
+      .upsert(
+        vectors
+      );
+
+    return jsonResponse({
+      ok: true,
+
+      message:
+        "Safety checks successfully indexed into Vectorize.",
+
+      index:
+        VECTOR_INDEX,
+
+      embedding_model:
+        EMBEDDING_MODEL,
+
+      dimensions:
+        768,
+
+      indexed:
+        vectors.length,
+
+      ids:
+        vectors.map(
+          vector =>
+            vector.id
+        ),
+    });
+  } catch (error) {
+    return jsonResponse(
+      {
+        ok: false,
+
+        error:
+          error instanceof Error
+            ? error.message
+            : String(error),
+      },
+      500
+    );
+  }
+}
+
+/* =========================================================
+   MAIN ANALYSIS
+   ========================================================= */
+
+async function analyze(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  let stage =
+    "starting";
+
+  let inspectionId =
+    "";
+
+  let photoId =
+    "";
+
+  let objectKey =
+    "";
+
+  let r2Uploaded =
+    false;
+
+  try {
+    /*
+     * -------------------------------------------------------
+     * 1. Parse image
+     * -------------------------------------------------------
+     */
+
+    stage =
+      "parse image";
+
+    const input =
+      await parseRequest(
+        request
+      );
+
+    const photo =
+      input.photo;
+
+    /*
+     * -------------------------------------------------------
+     * 2. Create IDs
+     * -------------------------------------------------------
+     */
+
+    stage =
+      "create IDs";
+
+    inspectionId =
+      uuid();
+
+    photoId =
+      uuid();
+
+    const inspectionNo =
+      inspectionNumber();
+
+    const createdAt =
+      nowISO();
+
+    /*
+     * -------------------------------------------------------
+     * 3. Generate R2 key
+     * -------------------------------------------------------
+     */
+
+    stage =
+      "generate R2 object key";
+
+    objectKey =
+      `inspections/${inspectionId}/${photoId}.${extension(
+        photo.contentType
+      )}`;
+
+    /*
+     * -------------------------------------------------------
+     * 4. D1 inspection
+     * -------------------------------------------------------
+     */
+
+    stage =
+      "D1 create inspection";
+
+    await insertInspection(
+      env,
+      inspectionId,
+      inspectionNo,
+      input.location,
+      input.inspector,
+      createdAt
+    );
+
+    /*
+     * -------------------------------------------------------
+     * 5. R2
+     * -------------------------------------------------------
+     */
+
+    stage =
+      "R2 upload";
+
+    await uploadToR2(
+      env,
+      objectKey,
+      photo,
+      {
+        inspectionId,
+
+        photoId,
+
+        inspectionNo,
+      }
+    );
+
+    r2Uploaded =
+      true;
+
+    /*
+     * -------------------------------------------------------
+     * 6. D1 photo
+     * -------------------------------------------------------
+     */
+
+    stage =
+      "D1 save inspection photo";
+
+    await insertPhoto(
+      env,
+      photoId,
+      inspectionId,
+      objectKey,
+      photo.fileName,
+      photo.contentType,
+      createdAt
+    );
+
+    /*
+     * -------------------------------------------------------
+     * 7. Load 22 WSHC checks
+     * -------------------------------------------------------
+     */
+
+    stage =
+      "D1 load safety checks";
+
+    const checks =
+      await loadSafetyChecks(
+        env
+      );
+
+    /*
+     * -------------------------------------------------------
+     * 8. Scene analysis
+     * -------------------------------------------------------
+     */
+
+    stage =
+      "scene analysis";
+
+    const sceneResult =
+      await analyzeScene(
+        env,
+        photo.bytes,
+        photo.contentType
+      );
+
+    const scene =
+      sceneResult.scene;
+
+    /*
+     * -------------------------------------------------------
+     * 9. Vectorize retrieval
+     * -------------------------------------------------------
+     */
+
+    stage =
+      "Vectorize retrieve relevant safety checks";
+
+    const retrieved =
+      await retrieveRelevantChecks(
+        env,
+        scene
+      );
+
+    /*
+     * -------------------------------------------------------
+     * 10. Final evidence-based AI
+     * -------------------------------------------------------
+     */
+
+    stage =
+      "evidence-based Workers AI";
+
+    const ai =
+      await runFinalAI(
+        env,
+        photo.bytes,
+        photo.contentType,
+        scene,
+        retrieved
+      );
+
+    /*
+     * -------------------------------------------------------
+     * 11. Parse AI
+     * -------------------------------------------------------
+     */
+
+    stage =
+      "parse final AI response";
+
+    const parsed =
+      parseAIResponse(
+        ai.raw
+      );
+
+    /*
+     * -------------------------------------------------------
+     * 12. Validate against scene
+     * -------------------------------------------------------
+     */
+
+    stage =
+      "evidence validation";
+
+    const findings =
+      normalizeFindings(
+        parsed,
+        checks,
+        scene
+      );
+
+    /*
+     * -------------------------------------------------------
+     * 13. Save findings
+     * -------------------------------------------------------
+     */
+
+    stage =
+      "D1 save inspection items";
+
+    await insertInspectionItems(
+      env,
+      inspectionId,
+      photoId,
+      findings
+    );
+
+    /*
+     * -------------------------------------------------------
+     * 14. Overall
+     * -------------------------------------------------------
+     */
+
+    stage =
+      "calculate overall result";
+
+    const result =
+      overall(
+        findings
+      );
+
+    /*
+     * -------------------------------------------------------
+     * 15. Update inspection
+     * -------------------------------------------------------
+     */
+
+    stage =
+      "D1 update inspection";
+
+    await updateInspection(
+      env,
+      inspectionId,
+      result
+    );
+
+    /*
+     * -------------------------------------------------------
+     * 16. Response
+     * -------------------------------------------------------
+     */
+
+    return jsonResponse({
+      ok: true,
+
+      inspection: {
+        id:
+          inspectionId,
+
+        inspection_no:
+          inspectionNo,
+
+        location:
+          input.location,
+
+        inspector:
+          input.inspector,
+
+        overall_result:
+          result,
+
+        created_at:
+          createdAt,
+      },
+
+      photo: {
+        id:
+          photoId,
+
+        object_key:
+          objectKey,
+
+        file_name:
+          photo.fileName,
+
+        content_type:
+          photo.contentType,
+      },
+
+      /*
+       * Scene information is returned so
+       * you can debug the AI behaviour.
+       */
+
+      scene: {
+        summary:
+          scene.scene_summary,
+
+        visible_objects:
+          scene.visible_objects,
+
+        visible_activities:
+          scene.visible_activities,
+
+        visible_hazards:
+          scene.visible_hazards,
+
+        visible_controls:
+          scene.visible_controls,
+
+        people_visible:
+          scene.people_visible,
+
+        vehicles_visible:
+          scene.vehicles_visible,
+
+        machinery_visible:
+          scene.machinery_visible,
+
+        lifting_visible:
+          scene.lifting_visible,
+
+        hot_work_visible:
+          scene.hot_work_visible,
+
+        electrical_visible:
+          scene.electrical_visible,
+
+        chemicals_visible:
+          scene.chemicals_visible,
+
+        cylinders_visible:
+          scene.cylinders_visible,
+
+        elevated_work_visible:
+          scene.elevated_work_visible,
+
+        storage_visible:
+          scene.storage_visible,
+
+        relevant_categories:
+          scene.relevant_categories,
+      },
+
+      vectorize: {
+        index:
+          VECTOR_INDEX,
+
+        embedding_model:
+          EMBEDDING_MODEL,
+
+        threshold:
+          VECTOR_MATCH_THRESHOLD,
+
+        retrieved:
+          retrieved.map(
+            item => ({
+              id:
+                item.check.id,
+
+              category:
+                item.check.category,
+
+              score:
+                item.score,
+            })
+          ),
+      },
+
+      ai: {
+        model:
+          MODEL,
+
+        response_length:
+          ai.raw.length,
+
+        response_preview:
+          ai.raw.substring(
+            0,
+            3000
+          ),
+
+        scene_response_preview:
+          sceneResult.raw.substring(
+            0,
+            3000
+          ),
+      },
+
+      summary:
+        buildSummary(
+          findings
+        ),
+
+      findings,
+
+      counts: {
+        total:
+          findings.length,
+
+        pass:
+          findings.filter(
+            f =>
+              f.status ===
+              "PASS"
+          ).length,
+
+        fail:
+          findings.filter(
+            f =>
+              f.status ===
+              "FAIL"
+          ).length,
+
+        check_required:
+          findings.filter(
+            f =>
+              f.status ===
+              "CHECK_REQUIRED"
+          ).length,
+      },
+    });
+  } catch (error) {
+    const detail =
+      error instanceof Error
+        ? error.message
+        : String(error);
+
+    /*
+     * Cleanup R2 if analysis failed.
+     */
+
+    if (
+      r2Uploaded &&
+      objectKey
+    ) {
+      try {
+        await env.PHOTOS.delete(
+          objectKey
+        );
+      } catch {
+        // Ignore cleanup failure.
+      }
+    }
+
+    /*
+     * Keep inspection record for
+     * troubleshooting.
+     */
+
+    if (
+      inspectionId
+    ) {
+      try {
+        await updateInspection(
+          env,
+          inspectionId,
+          "CHECK_REQUIRED"
+        );
+      } catch {
+        // Ignore secondary failure.
+      }
+    }
+
+    const diagnostic =
+      [
+        "AI analysis failed.",
+
+        `Stage: ${stage}`,
+
+        `Detail: ${detail}`,
+
+        inspectionId
+          ? `Inspection ID: ${inspectionId}`
+          : "",
+
+        photoId
+          ? `Photo ID: ${photoId}`
+          : "",
+
+        objectKey
+          ? `R2 object: ${objectKey}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+    return jsonResponse(
+      {
+        ok: false,
+
+        error:
+          diagnostic,
+
+        stage,
+
+        detail,
+
+        inspectionId:
+          inspectionId ||
+          null,
+
+        photoId:
+          photoId ||
+          null,
+
+        objectKey:
+          objectKey ||
+          null,
+      },
+      500
+    );
+  }
+}
+
+/* =========================================================
+   GET INSPECTION
+   ========================================================= */
+
+async function getInspection(
+  env: Env,
+  id: string
+): Promise<Response> {
+  try {
+    const inspection =
+      await env.SAFETY_DB
+        .prepare(
+          `
+          SELECT *
+          FROM inspections
+          WHERE id = ?
+          LIMIT 1
+          `
+        )
+        .bind(id)
+        .first();
+
+    if (!inspection) {
+      return jsonResponse(
+        {
+          ok: false,
+
+          error:
+            "Inspection not found.",
+        },
+        404
+      );
+    }
+
+    const photos =
+      await env.SAFETY_DB
+        .prepare(
+          `
+          SELECT *
+          FROM inspection_photos
+          WHERE inspection_id = ?
+          ORDER BY created_at
+          `
+        )
+        .bind(id)
+        .all();
+
+    const items =
+      await env.SAFETY_DB
+        .prepare(
+          `
+          SELECT
+            ii.*,
+            sc.check_question,
+            sc.guidance,
+            sc.source_type
+          FROM inspection_items ii
+          LEFT JOIN safety_checks sc
+            ON sc.id = ii.check_id
+          WHERE ii.inspection_id = ?
+          ORDER BY ii.created_at
+          `
+        )
+        .bind(id)
+        .all();
+
+    return jsonResponse({
+      ok: true,
+
+      inspection,
+
+      photos:
+        photos.results ||
+        [],
+
+      findings:
+        items.results ||
+        [],
+    });
+  } catch (error) {
+    return jsonResponse(
+      {
+        ok: false,
+
+        error:
+          error instanceof Error
+            ? error.message
+            : String(error),
+      },
+      500
+    );
+  }
+}
+
+/* =========================================================
+   RECENT INSPECTIONS
+   ========================================================= */
+
+async function recentInspections(
+  env: Env
+): Promise<Response> {
+  try {
+    const result =
+      await env.SAFETY_DB
+        .prepare(
+          `
+          SELECT *
+          FROM inspections
+          ORDER BY created_at DESC
+          LIMIT 30
+          `
+        )
+        .all();
+
+    return jsonResponse({
+      ok: true,
+
+      inspections:
+        result.results ||
+        [],
+    });
+  } catch (error) {
+    return jsonResponse(
+      {
+        ok: false,
+
+        error:
+          error instanceof Error
+            ? error.message
+            : String(error),
+      },
+      500
+    );
+  }
+}
+
+/* =========================================================
+   HEALTH
+   ========================================================= */
+
+async function health(
+  env: Env
+): Promise<Response> {
+  let database =
+    false;
+
+  let safetyChecks =
+    false;
+
+  let r2 =
+    false;
+
+  let vectorize =
+    false;
+
+  let vectorizeIndex =
+    VECTOR_INDEX;
+
+  try {
+    await env.SAFETY_DB
+      .prepare(
+        "SELECT 1 AS ok"
+      )
+      .first();
+
+    database =
+      true;
+  } catch {
+    database =
+      false;
+  }
+
+  try {
+    await loadSafetyChecks(
+      env
+    );
+
+    safetyChecks =
+      true;
+  } catch {
+    safetyChecks =
+      false;
+  }
+
+  try {
+    r2 =
+      !!env.PHOTOS;
+  } catch {
+    r2 =
+      false;
+  }
+
+  try {
+    vectorize =
+      !!env.VECTORIZE;
+  } catch {
+    vectorize =
+      false;
+  }
+
+  return jsonResponse({
+    ok:
+      database &&
+      safetyChecks &&
+      r2 &&
+      vectorize,
+
+    worker:
+      "depot-safety",
+
+    model:
+      MODEL,
+
+    embedding_model:
+      EMBEDDING_MODEL,
+
+    database,
+
+    safety_checks:
+      safetyChecks,
+
+    r2,
+
+    vectorize,
+
+    vectorize_index:
+      vectorizeIndex,
+
+    vectorize_dimensions:
+      768,
+
+    vector_match_threshold:
+      VECTOR_MATCH_THRESHOLD,
+
+    timestamp:
+      nowISO(),
+  });
+}
+
+/* =========================================================
+   SAFETY CHECK API
+   ========================================================= */
+
+async function safetyChecks(
+  env: Env
+): Promise<Response> {
+  try {
+    const checks =
+      await loadSafetyChecks(
+        env
+      );
+
+    return jsonResponse({
+      ok: true,
+
+      count:
+        checks.length,
+
+      checks,
+    });
+  } catch (error) {
+    return jsonResponse(
+      {
+        ok: false,
+
+        error:
+          error instanceof Error
+            ? error.message
+            : String(error),
+      },
+      500
+    );
+  }
+}
+
+/* =========================================================
+   PHOTO API
+   ========================================================= */
+
+async function getPhoto(
+  env: Env,
+  objectKey: string
+): Promise<Response> {
+  try {
+    const object =
+      await env.PHOTOS.get(
+        objectKey
+      );
+
+    if (!object) {
+      return textResponse(
+        "Photo not found.",
+        404
+      );
+    }
+
+    const headers =
+      new Headers();
+
+    object.writeHttpMetadata(
+      headers
+    );
+
+    headers.set(
+      "ETag",
+      object.httpEtag
+    );
+
+    headers.set(
+      "Cache-Control",
+      "private, max-age=3600"
+    );
+
+    return new Response(
+      object.body,
+      {
+        status: 200,
+        headers,
+      }
+    );
+  } catch (error) {
+    return textResponse(
+      error instanceof Error
+        ? error.message
+        : String(error),
+      500
+    );
+  }
+}
+
+/* =========================================================
+   API ROUTER
+   ========================================================= */
+
+async function api(
+  request: Request,
+  env: Env,
+  url: URL
+): Promise<Response> {
+  const path =
+    url.pathname;
+
+  /*
+   * Health
+   */
+
+  if (
+    request.method ===
+      "GET" &&
+    path ===
+      "/api/health"
+  ) {
+    return health(
+      env
+    );
+  }
+
+  /*
+   * Main AI analysis.
+   *
+   * Both /api/analyze and /api/analysis
+   * are supported.
+   */
+
+  if (
+    request.method ===
+      "POST" &&
+    (
+      path ===
+        "/api/analyze" ||
+      path ===
+        "/api/analysis"
+    )
+  ) {
+    return analyze(
+      request,
+      env
+    );
+  }
+
+  /*
+   * Vectorize seed.
+   */
+
+  if (
+    request.method ===
+      "POST" &&
+    path ===
+      "/api/vectorize/seed"
+  ) {
+    return seedVectorize(
+      request,
+      env
+    );
+  }
+
+  /*
+   * Recent inspections.
+   */
+
+  if (
+    request.method ===
+      "GET" &&
+    path ===
+      "/api/inspections"
+  ) {
+    return recentInspections(
+      env
+    );
+  }
+
+  /*
+   * Individual inspection.
+   */
+
+  if (
+    request.method ===
+      "GET" &&
+    path.startsWith(
+      "/api/inspection/"
+    )
+  ) {
+    const id =
+      decodeURIComponent(
+        path.substring(
+          "/api/inspection/"
+            .length
+        )
+      );
+
+    if (!id) {
+      return jsonResponse(
+        {
+          ok: false,
+
+          error:
+            "Missing inspection ID.",
+        },
+        400
+      );
+    }
+
+    return getInspection(
+      env,
+      id
+    );
+  }
+
+  /*
+   * Safety checks.
+   */
+
+  if (
+    request.method ===
+      "GET" &&
+    path ===
+      "/api/safety-checks"
+  ) {
+    return safetyChecks(
+      env
+    );
+  }
+
+  /*
+   * Photo.
+   */
+
+  if (
+    request.method ===
+      "GET" &&
+    path ===
+      "/api/photo"
+  ) {
+    const key =
+      url.searchParams.get(
+        "key"
+      );
+
+    if (!key) {
+      return textResponse(
+        "Missing photo key.",
+        400
+      );
+    }
+
+    return getPhoto(
+      env,
+      key
+    );
+  }
+
+  return jsonResponse(
+    {
+      ok: false,
+
+      error:
+        "API endpoint not found.",
+
+      path,
+    },
+    404
+  );
+}
+
+/* =========================================================
+   WORKER ENTRY
+   ========================================================= */
+
+export default {
+  async fetch(
+    request: Request,
+    env: Env
+  ): Promise<Response> {
+    try {
+      /*
+       * CORS preflight
+       */
+
+      if (
+        request.method ===
+        "OPTIONS"
+      ) {
+        return new Response(
+          null,
+          {
+            status: 204,
+
+            headers: {
+              "Access-Control-Allow-Origin":
+                "*",
+
+              "Access-Control-Allow-Methods":
+                "GET, POST, OPTIONS",
+
+              "Access-Control-Allow-Headers":
+                "Content-Type, X-Vectorize-Seed-Key",
+            },
+          }
+        );
+      }
+
+      const url =
+        new URL(
+          request.url
+        );
+
+      /*
+       * API
+       */
+
+      if (
+        url.pathname.startsWith(
+          "/api/"
+        )
+      ) {
+        return api(
+          request,
+          env,
+          url
+        );
+      }
+
+      /*
+       * Frontend assets
+       */
+
+      try {
+        const asset =
+          await env.ASSETS.fetch(
+            request
+          );
+
+        if (
+          asset.status !==
+          404
+        ) {
+          return asset;
+        }
+      } catch {
+        // Continue.
+      }
+
+      return new Response(
+        "Depot Safety AI is running.",
+        {
+          status: 200,
+
+          headers: {
+            "Content-Type":
+              "text/plain; charset=utf-8",
+          },
+        }
+      );
+    } catch (error) {
+      return jsonResponse(
+        {
+          ok: false,
+
+          error:
+            error instanceof Error
+              ? error.message
+              : String(error),
+        },
+        500
+      );
+    }
+  },
+} satisfies ExportedHandler<Env>;
