@@ -7,7 +7,7 @@ export interface Env {
 
   /*
    * Create this as a Cloudflare Worker secret:
-   *
+   *.
    * VECTORIZE_SEED_KEY
    *
    * It is used only for the one-time Vectorize seed operation.
