@@ -2,6 +2,7 @@ export interface Env {
   AI: Ai;
   SAFETY_DB: D1Database;
   PHOTOS: R2Bucket;
+  VECTORIZE: VectorizeIndex;
   ASSETS: Fetcher;
 }
 
@@ -2606,15 +2607,15 @@ async function recentInspections(
 async function health(
   env: Env
 ): Promise<Response> {
+
   let database = false;
   let safetyChecks = false;
   let r2 = false;
+  let vectorize = false;
 
   try {
     await env.SAFETY_DB
-      .prepare(
-        "SELECT 1 AS ok"
-      )
+      .prepare("SELECT 1 AS ok")
       .first();
 
     database = true;
@@ -2623,10 +2624,7 @@ async function health(
   }
 
   try {
-    await loadSafetyChecks(
-      env
-    );
-
+    await loadSafetyChecks(env);
     safetyChecks = true;
   } catch {
     safetyChecks = false;
@@ -2638,17 +2636,22 @@ async function health(
     r2 = false;
   }
 
+  try {
+    vectorize = !!env.VECTORIZE;
+  } catch {
+    vectorize = false;
+  }
+
   return jsonResponse({
     ok:
       database &&
       safetyChecks &&
-      r2,
+      r2 &&
+      vectorize,
 
-    worker:
-      "depot-safety",
+    worker: "depot-safety",
 
-    model:
-      MODEL,
+    model: MODEL,
 
     database,
 
@@ -2657,11 +2660,11 @@ async function health(
 
     r2,
 
-    timestamp:
-      nowISO(),
+    vectorize,
+
+    timestamp: nowISO(),
   });
 }
-
 /* =========================================================
    SAFETY CHECK API
    ========================================================= */
