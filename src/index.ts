@@ -1434,19 +1434,7 @@ async function analysePhoto(
      * objectKey. We don't change how the image is stored.
      */
 
-    const objectKey =
-      getObjectKeyFromRequest(body);
-
-    if (!objectKey) {
-      return json(
-        {
-          ok: false,
-          error:
-            "Photo upload completed without an R2 object key. The existing R2 upload flow was not changed.",
-        },
-        400
-      );
-    }
+  
 
     /*
      * Load the authoritative WSH checks.
