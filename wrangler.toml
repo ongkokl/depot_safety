@@ -17,3 +17,7 @@ migrations_dir = "migrations"
 [[r2_buckets]]
 binding = "PHOTOS"
 bucket_name = "safety-inspection-photos"
+
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "safety-checks"
