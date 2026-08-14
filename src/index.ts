@@ -1,4 +1,4 @@
-/* Depot Safety AI Worker - Version 2.1
+/* Depot Safety AI Worker - Version 2.2
  *
  * Features:
  * - Cloudflare Workers AI vision analysis
@@ -573,28 +573,127 @@ function normalizeCategory(category: string): string {
 }
 
 function detectEquipmentType(category: string, title: string, observation: string, aiType?: string): string {
-  const explicit = clean(aiType, 80).toUpperCase().replace(/\s+/g, "_");
+  const text = `${category} ${title} ${observation}`
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+
+  /*
+   * IMPORTANT:
+   *
+   * Do not blindly trust the AI equipment_type when the text contains
+   * a more specific structure. For example, the vision model may return
+   * LADDER for a mobile access structure because it sees ladders inside
+   * the structure. A phrase such as "ladder and platform" should therefore
+   * resolve to MOBILE_ACCESS_PLATFORM.
+   */
+
+  if (
+    text.includes("mobile access platform") ||
+    text.includes("mobile platform") ||
+    text.includes("access platform") ||
+    text.includes("platform with ladder") ||
+    text.includes("ladder and platform") ||
+    text.includes("ladder with platform") ||
+    text.includes("elevated access structure") ||
+    text.includes("access structure with")
+  ) {
+    return "MOBILE_ACCESS_PLATFORM";
+  }
+
+  if (
+    text.includes("scaffold") ||
+    text.includes("scaffolding")
+  ) {
+    return "SCAFFOLD";
+  }
+
+  if (text.includes("reach stacker") || text.includes("reachstacker")) {
+    return "REACH_STACKER";
+  }
+
+  if (text.includes("forklift") || text.includes("fork lift")) {
+    return "FORKLIFT";
+  }
+
+  if (
+    text.includes("spreader") ||
+    text.includes("sling") ||
+    text.includes("lifting gear") ||
+    text.includes("lifting equipment") ||
+    text.includes("lifting hook")
+  ) {
+    return "LIFTING_GEAR";
+  }
+
+  if (text.includes("ladder")) {
+    return "LADDER";
+  }
+
+  if (text.includes("welding") || text.includes("weld")) {
+    return "WELDING";
+  }
+
+  if (text.includes("grinding") || text.includes("grinder")) {
+    return "GRINDING";
+  }
+
+  if (
+    text.includes("electrical tool") ||
+    text.includes("power tool") ||
+    text.includes("electric tool")
+  ) {
+    return "ELECTRICAL_TOOL";
+  }
+
+  if (
+    text.includes("chemical") ||
+    text.includes("solvent") ||
+    text.includes("paint")
+  ) {
+    return "CHEMICAL";
+  }
+
+  if (
+    text.includes("container repair") ||
+    text.includes("container maintenance")
+  ) {
+    return "CONTAINER_REPAIR";
+  }
+
+  if (
+    text.includes("vehicle") ||
+    text.includes("truck") ||
+    text.includes("lorry")
+  ) {
+    return "VEHICLE";
+  }
+
+  /*
+   * Only use the AI supplied type after checking the actual description.
+   */
+  const explicit = clean(aiType, 80)
+    .toUpperCase()
+    .replace(/\s+/g, "_");
+
   const allowed = new Set([
-    "LADDER", "MOBILE_ACCESS_PLATFORM", "SCAFFOLD", "FORKLIFT",
-    "REACH_STACKER", "LIFTING_GEAR", "CONTAINER_REPAIR", "WELDING",
-    "GRINDING", "ELECTRICAL_TOOL", "CHEMICAL", "VEHICLE", "GENERAL",
+    "LADDER",
+    "MOBILE_ACCESS_PLATFORM",
+    "SCAFFOLD",
+    "FORKLIFT",
+    "REACH_STACKER",
+    "LIFTING_GEAR",
+    "CONTAINER_REPAIR",
+    "WELDING",
+    "GRINDING",
+    "ELECTRICAL_TOOL",
+    "CHEMICAL",
+    "VEHICLE",
+    "GENERAL",
   ]);
+
   if (allowed.has(explicit)) return explicit;
 
-  const text = `${category} ${title} ${observation}`.toLowerCase();
-
-  if (text.includes("reach stacker")) return "REACH_STACKER";
-  if (text.includes("forklift") || text.includes("fork lift")) return "FORKLIFT";
-  if (text.includes("mobile access") || text.includes("access platform")) return "MOBILE_ACCESS_PLATFORM";
-  if (text.includes("scaffold")) return "SCAFFOLD";
-  if (text.includes("ladder")) return "LADDER";
-  if (text.includes("spreader") || text.includes("sling") || text.includes("lifting gear") || text.includes("hook")) return "LIFTING_GEAR";
-  if (text.includes("welding") || text.includes("weld")) return "WELDING";
-  if (text.includes("grinding") || text.includes("grinder")) return "GRINDING";
-  if (text.includes("electrical tool") || text.includes("power tool")) return "ELECTRICAL_TOOL";
-  if (text.includes("chemical") || text.includes("solvent") || text.includes("paint")) return "CHEMICAL";
-  if (text.includes("container repair") || text.includes("container")) return "CONTAINER_REPAIR";
-  if (text.includes("vehicle") || text.includes("truck") || text.includes("lorry")) return "VEHICLE";
   return "GENERAL";
 }
 
@@ -861,12 +960,81 @@ function findCheck(
   return bestScore > 0 ? best : null;
 }
 
+function checklistEquipmentTypes(equipmentType: string): string[] {
+  const type = clean(equipmentType, 80).toUpperCase();
+
+  const map: Record<string, string[]> = {
+    MOBILE_ACCESS_PLATFORM: [
+      "MOBILE_ACCESS_PLATFORM",
+      "LADDER",
+      "GENERAL",
+    ],
+    SCAFFOLD: [
+      "SCAFFOLD",
+      "MOBILE_ACCESS_PLATFORM",
+      "GENERAL",
+    ],
+    LADDER: [
+      "LADDER",
+      "GENERAL",
+    ],
+    FORKLIFT: [
+      "FORKLIFT",
+      "VEHICLE",
+      "GENERAL",
+    ],
+    REACH_STACKER: [
+      "REACH_STACKER",
+      "VEHICLE",
+      "GENERAL",
+    ],
+    LIFTING_GEAR: [
+      "LIFTING_GEAR",
+      "GENERAL",
+    ],
+    WELDING: [
+      "WELDING",
+      "HOT_WORK",
+      "GENERAL",
+    ],
+    GRINDING: [
+      "GRINDING",
+      "HOT_WORK",
+      "GENERAL",
+    ],
+    ELECTRICAL_TOOL: [
+      "ELECTRICAL_TOOL",
+      "GENERAL",
+    ],
+    CHEMICAL: [
+      "CHEMICAL",
+      "GENERAL",
+    ],
+    CONTAINER_REPAIR: [
+      "CONTAINER_REPAIR",
+      "GENERAL",
+    ],
+    VEHICLE: [
+      "VEHICLE",
+      "GENERAL",
+    ],
+    GENERAL: [
+      "GENERAL",
+    ],
+  };
+
+  return map[type] || [type, "GENERAL"];
+}
+
 async function loadChecklistItems(
   env: Env,
   checkId: string,
   equipmentType: string
 ): Promise<ChecklistItem[]> {
   await ensureChecklistTable(env);
+
+  const equipmentTypes = checklistEquipmentTypes(equipmentType);
+  const placeholders = equipmentTypes.map(() => "?").join(", ");
 
   const result = await env.SAFETY_DB.prepare(`
     SELECT
@@ -883,20 +1051,42 @@ async function loadChecklistItems(
     FROM safety_check_items
     WHERE safety_check_id = ?
       AND active = 1
-      AND (equipment_type = ? OR equipment_type = 'GENERAL')
+      AND equipment_type IN (${placeholders})
     ORDER BY
-      CASE importance WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 ELSE 3 END,
-      CASE check_type WHEN 'VISUAL' THEN 1 WHEN 'BOTH' THEN 2 ELSE 3 END,
+      CASE equipment_type
+        ${equipmentTypes.map((type, index) => `WHEN '${type.replace(/'/g, "''")}' THEN ${index + 1}`).join("\n        ")}
+        ELSE 99
+      END,
+      CASE importance
+        WHEN 'HIGH' THEN 1
+        WHEN 'MEDIUM' THEN 2
+        ELSE 3
+      END,
+      CASE check_type
+        WHEN 'VISUAL' THEN 1
+        WHEN 'BOTH' THEN 2
+        ELSE 3
+      END,
       id
     LIMIT ?
-  `).bind(checkId, equipmentType, MAX_CHECKLIST_ITEMS).all<ChecklistItem>();
+  `)
+    .bind(checkId, ...equipmentTypes, MAX_CHECKLIST_ITEMS)
+    .all<ChecklistItem>();
 
-  return (result.results || []).map(item => ({
-    ...item,
-    check_type: (item.check_type || "PHYSICAL") as CheckType,
-    importance: (item.importance || "MEDIUM") as Risk,
-    source_type: (item.source_type || "WSHC_DERIVED") as SourceType,
-  }));
+  const seen = new Set<string>();
+
+  return (result.results || [])
+    .filter(item => {
+      if (seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    })
+    .map(item => ({
+      ...item,
+      check_type: (item.check_type || "PHYSICAL") as CheckType,
+      importance: (item.importance || "MEDIUM") as Risk,
+      source_type: (item.source_type || "WSHC_DERIVED") as SourceType,
+    }));
 }
 
 async function searchRelevantWSHCChecks(env: Env, text: string): Promise<any[]> {
@@ -1157,6 +1347,8 @@ async function insertInspectionItems(
       check_id: finding.check_id,
       source_title: finding.source_title,
       source_url: finding.source_url,
+      source_type: finding.source_type,
+      equipment_type: finding.equipment_type,
       created_at: nowISO(),
     });
 
@@ -1519,10 +1711,22 @@ async function seedVectorize(request: Request, env: Env): Promise<Response> {
   }
 }
 
+type SeedTuple = [
+  string,
+  string,
+  string,
+  string,
+  CheckType,
+  Risk,
+  string,
+  string,
+  SourceType
+];
+
 /* Detailed checklist seed. These are WSHC-derived operational prompts.
  * Keep the source URL attached to every item so the UI can trace the guidance.
  */
-const CHECKLIST_SEED: Array<Omit<ChecklistItem, "active">> = [
+const CHECKLIST_SEED: SeedTuple[] = [
   // PPE
   ["ppe-visual-001","ppe-001","GENERAL","Required head protection appears to be worn correctly.","VISUAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
   ["ppe-visual-002","ppe-001","GENERAL","High-visibility clothing appears to be worn where the work environment requires visibility.","VISUAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
@@ -1555,6 +1759,13 @@ const CHECKLIST_SEED: Array<Omit<ChecklistItem, "active">> = [
   ["wah-physical-002","work-height-001","MOBILE_ACCESS_PLATFORM","Wheels or castors are locked and the structure is stable before use.","PHYSICAL","HIGH","WSHC Preventing Falls from Height","https://www.tal.sg/wshc/topics/work-at-height/preventing-falls-from-heights","WSHC_DERIVED"],
   ["wah-physical-003","work-height-001","MOBILE_ACCESS_PLATFORM","Inspection or tagging status is verified before use.","PHYSICAL","HIGH","WSHC Preventing Falls from Height","https://www.tal.sg/wshc/topics/work-at-height/preventing-falls-from-heights","WSHC_DERIVED"],
   ["wah-physical-004","work-height-001","LADDER","Stable and level ground, safe access and three-point contact requirements are verified.","PHYSICAL","HIGH","WSHC Preventing Falls from Height","https://www.tal.sg/wshc/topics/work-at-height/preventing-falls-from-heights","WSHC_DERIVED"],
+  ["wah-ladder-visual-001","work-height-001","LADDER","Ladder rungs, stiles and feet show no obvious damage, excessive wear or missing components.","VISUAL","HIGH","WSHC Safe Use of Ladders Checklist","https://www.tal.sg/wshc/topics/work-at-height","WSHC_DERIVED"],
+  ["wah-ladder-visual-002","work-height-001","LADDER","Ladder is free from obvious oil, grease, mud or other conditions that could cause slipping.","VISUAL","HIGH","WSHC Safe Use of Ladders Checklist","https://www.tal.sg/wshc/topics/work-at-height","WSHC_DERIVED"],
+  ["wah-ladder-visual-003","work-height-001","LADDER","Ladder is positioned to provide safe access and is not visibly placed on an unstable support.","VISUAL","HIGH","WSHC Safe Use of Ladders Checklist","https://www.tal.sg/wshc/topics/work-at-height","WSHC_DERIVED"],
+  ["wah-ladder-physical-001","work-height-001","LADDER","Ladder is secured against slipping, sliding or overturning before use.","PHYSICAL","HIGH","WSHC Safe Use of Ladders Checklist","https://www.tal.sg/wshc/topics/work-at-height","WSHC_DERIVED"],
+  ["wah-ladder-physical-002","work-height-001","LADDER","Worker maintains three-point contact when climbing or working from the ladder.","PHYSICAL","HIGH","WSHC Safe Use of Ladders Checklist","https://www.tal.sg/wshc/topics/work-at-height","WSHC_DERIVED"],
+  ["wah-ladder-physical-003","work-height-001","LADDER","Worker does not stand on the top rung or otherwise use the ladder beyond its safe working limits.","PHYSICAL","HIGH","WSHC Safe Use of Ladders Checklist","https://www.tal.sg/wshc/topics/work-at-height","WSHC_DERIVED"],
+  ["wah-ladder-physical-004","work-height-001","LADDER","Ladder is suitable for the task and the worker can maintain a safe handhold and footing.","PHYSICAL","HIGH","WSHC Safe Use of Ladders Checklist","https://www.tal.sg/wshc/topics/work-at-height","WSHC_DERIVED"],
 
   ["wah-visual-004","work-height-001","SCAFFOLD","Scaffold components, working platforms and guardrails show no obvious damage or missing sections.","VISUAL","HIGH","WSHC Preventing Falls from Height","https://www.tal.sg/wshc/topics/work-at-height/preventing-falls-from-heights","WSHC_DIRECT"],
   ["wah-physical-005","work-height-001","SCAFFOLD","Scaffold stability, access, guardrails and inspection/tagging status are verified before use.","PHYSICAL","HIGH","WSHC Preventing Falls from Height","https://www.tal.sg/wshc/topics/work-at-height/preventing-falls-from-heights","WSHC_DIRECT"],
@@ -1640,10 +1851,6 @@ const CHECKLIST_SEED: Array<Omit<ChecklistItem, "active">> = [
   ["store-visual-002","storage-001","GENERAL","Aisles and access routes are visibly clear.","VISUAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
   ["store-physical-001","storage-001","GENERAL","Storage arrangement, stack height and load limits are verified.","PHYSICAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
   ["store-physical-002","storage-001","GENERAL","Damaged pallets, racks or storage equipment are removed or controlled.","PHYSICAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
-];
-
-type SeedTuple = [
-  string,string,string,string,CheckType,Risk,string,string,SourceType
 ];
 
 async function seedChecklist(request: Request, env: Env): Promise<Response> {
