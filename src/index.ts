@@ -473,17 +473,36 @@ async function runAI(
     throw new Error(`Workers AI request failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  const raw =
-    typeof response === "string"
-      ? response
-      : typeof response?.response === "string"
-        ? response.response
-        : typeof response?.result === "string"
-          ? response.result
-          : "";
+  /*
+   * Workers AI may return either:
+   *
+   *   { response: "{ ...json... }" }
+   *
+   * or, with structured output/tool calling:
+   *
+   *   { response: { findings: [...] }, tool_calls: [...] }
+   *
+   * The v2.3 parser only accepted a string. That caused a valid
+   * structured response to be reported as "returned no text".
+   */
+  let raw = "";
+
+  if (typeof response === "string") {
+    raw = response;
+  } else if (typeof response?.response === "string") {
+    raw = response.response;
+  } else if (response?.response && typeof response.response === "object") {
+    raw = JSON.stringify(response.response);
+  } else if (typeof response?.result === "string") {
+    raw = response.result;
+  } else if (response?.result && typeof response.result === "object") {
+    raw = JSON.stringify(response.result);
+  } else if (response?.findings && Array.isArray(response.findings)) {
+    raw = JSON.stringify({ findings: response.findings });
+  }
 
   if (!raw.trim()) {
-    throw new Error(`Workers AI returned no text. Response: ${JSON.stringify(response).substring(0, 3000)}`);
+    throw new Error(`Workers AI returned no usable response. Response: ${JSON.stringify(response).substring(0, 3000)}`);
   }
 
   return { raw: raw.trim(), result: response };
