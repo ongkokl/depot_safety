@@ -1,4 +1,4 @@
-/* Depot Safety AI Worker - Version 2.5
+/* Depot Safety AI Worker - Version 2.6
  *
  * Features:
  * - Cloudflare Workers AI vision analysis
@@ -361,89 +361,173 @@ CATEGORY: ${check.category}
 QUESTION: ${clean(check.check_question, 350)}
 GUIDANCE: ${clean(check.guidance, 500)}
 KEYWORDS: ${clean(check.keywords, 250)}
-SOURCE: ${clean(check.source_title, 250)}
-URL: ${clean(check.source_url, 500)}
 `).join("\n");
 
   return `
-You are a workplace safety inspection assistant for a Singapore shipping/container depot and container repair yard.
+You are a careful workplace safety visual inspection assistant for a Singapore shipping/container depot and container repair yard.
 
-Analyse ONLY what is visibly supported by the photograph.
+Analyse ONLY the photograph and report safety-relevant conditions that are visibly supported by the image.
 
-Do not invent hazards.
-Do not assume every safety category applies.
-Only assess a category when there is visible evidence relevant to that category.
+IMPORTANT SAFETY RULES:
+1. A category that is not visible or not relevant MUST be omitted.
+2. Never create a PASS finding merely because something is not visible.
+3. Never report statements such as "no visible electrical equipment", "no visible forklift", "no visible chemicals", or similar negative-visibility observations.
+4. A generic object, person, container, road, concrete surface or background vehicle is NOT automatically a safety finding.
+5. Report an object only when it is itself safety-relevant or there is a visible safety condition/activity associated with it.
+6. If a photograph does not provide enough evidence to confirm that a relevant item is safe, use CHECK_REQUIRED.
+7. PASS means there is positive visible evidence supporting the pass.
+8. FAIL means a visible unsafe condition is present.
+9. CHECK_REQUIRED means a relevant safety condition/equipment/activity is visible but physical condition or safe operation cannot be fully confirmed from the photograph.
+10. Do not invent details that cannot be seen.
+11. A single visible object may legitimately belong to more than one safety category. For example, an elevated frame marked SWL 2500 KG may be relevant to both Work at Height and Lifting.
+12. Identify the most specific equipment/activity when it is visibly supported.
+13. Do NOT determine WSHC check IDs, source URLs, or WSHC source types. Those are resolved by the Worker using D1 and Vectorize after the visual analysis.
 
-IMPORTANT:
-Do not return negative visibility findings.
-Never write:
-"No visible..."
-"No evidence..."
-"Not observed..."
-"No visible lifting..."
-"No visible electrical..."
-etc.
+EQUIPMENT TYPES WHEN CLEARLY SUPPORTED:
+LADDER, MOBILE_ACCESS_PLATFORM, SCAFFOLD, FORKLIFT, REACH_STACKER, LIFTING_GEAR, CONTAINER_REPAIR, WELDING, GRINDING, ELECTRICAL_TOOL, CHEMICAL, VEHICLE, GENERAL.
 
-Only return POSITIVE visible observations or a relevant condition that genuinely needs verification.
+CONFIDENCE must be between 0 and 1.
 
-A visible object by itself is NOT a safety finding. Do not report generic objects, surfaces, containers, roads, people, or background equipment unless there is a concrete safety condition or a clearly identifiable safety-relevant activity/equipment.
+Return ONLY the JSON object required by the response schema. Do not return Markdown, explanations, headings, or a scene description.
 
-Never mark a category PASS merely because something is not visible. If a category is not relevant to the photograph, OMIT it completely.
-
-If the photograph shows a person, equipment, structure, activity or hazard that is relevant to a WSH check, report it.
-
-If equipment has multiple safety functions, report the relevant categories. For example, a frame marked SWL 2500 KG may be relevant to Lifting as well as Work at Height when its elevated platform/access function is visible.
-
-Identify the most specific equipment/activity when possible:
-- LADDER
-- MOBILE_ACCESS_PLATFORM
-- SCAFFOLD
-- FORKLIFT
-- REACH_STACKER
-- LIFTING_GEAR
-- CONTAINER_REPAIR
-- WELDING
-- GRINDING
-- ELECTRICAL_TOOL
-- CHEMICAL
-- VEHICLE
-- GENERAL
-
-Status:
-PASS = visible condition appears satisfactory.
-FAIL = visible unsafe condition is identified.
-CHECK_REQUIRED = relevant condition is visible but photograph is insufficient to confirm safe condition.
-
-Risk:
-LOW = satisfactory/minor concern.
-MEDIUM = potential safety concern.
-HIGH = serious visible safety concern.
-
-Confidence must be between 0 and 1.
-
-Return ONLY JSON.
-Do not return Markdown.
-Do not add commentary.
-
-Use this exact JSON schema:
-{
-  "findings": [
-    {
-      "category": "Work at Height",
-      "title": "Elevated access structure requires verification",
-      "observation": "A mobile access structure with an elevated platform is visible.",
-      "status": "CHECK_REQUIRED",
-      "risk": "MEDIUM",
-      "confidence": 0.88,
-      "check_id": "work-height-001",
-      "equipment_type": "MOBILE_ACCESS_PLATFORM"
-    }
-  ]
-}
-
-AVAILABLE WSH CHECKS:
+AVAILABLE WSH CHECK CATEGORIES:
 ${available}
 `.trim();
+}
+
+const AI_FINDINGS_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    findings: {
+      type: "array",
+      maxItems: MAX_FINDINGS,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          category: {
+            type: "string",
+            description: "The relevant safety category supported by visible evidence."
+          },
+          title: {
+            type: "string",
+            description: "Short safety finding title."
+          },
+          observation: {
+            type: "string",
+            description: "Only visible evidence from the photograph."
+          },
+          status: {
+            type: "string",
+            enum: ["PASS", "FAIL", "CHECK_REQUIRED"]
+          },
+          risk: {
+            type: "string",
+            enum: ["LOW", "MEDIUM", "HIGH"]
+          },
+          confidence: {
+            type: "number",
+            minimum: 0,
+            maximum: 1
+          },
+          equipment_type: {
+            type: "string",
+            enum: [
+              "LADDER",
+              "MOBILE_ACCESS_PLATFORM",
+              "SCAFFOLD",
+              "FORKLIFT",
+              "REACH_STACKER",
+              "LIFTING_GEAR",
+              "CONTAINER_REPAIR",
+              "WELDING",
+              "GRINDING",
+              "ELECTRICAL_TOOL",
+              "CHEMICAL",
+              "VEHICLE",
+              "GENERAL"
+            ]
+          }
+        },
+        required: [
+          "category",
+          "title",
+          "observation",
+          "status",
+          "risk",
+          "confidence",
+          "equipment_type"
+        ]
+      }
+    }
+  },
+  required: ["findings"]
+};
+
+function responseToRawAI(response: any): string {
+  if (typeof response === "string") return response;
+
+  if (typeof response?.response === "string") {
+    return response.response;
+  }
+
+  if (response?.response && typeof response.response === "object") {
+    return JSON.stringify(response.response);
+  }
+
+  if (typeof response?.result === "string") {
+    return response.result;
+  }
+
+  if (response?.result && typeof response.result === "object") {
+    return JSON.stringify(response.result);
+  }
+
+  if (response?.findings && Array.isArray(response.findings)) {
+    return JSON.stringify({ findings: response.findings });
+  }
+
+  return "";
+}
+
+async function callVisionAI(
+  env: Env,
+  imageData: string,
+  prompt: string,
+  useSchema: boolean
+): Promise<any> {
+  const input: any = {
+    messages: [
+      {
+        role: "system",
+        content:
+          "You are a careful Singapore workplace safety visual inspection assistant. Return only structured JSON containing visible safety findings. Never describe categories that are not relevant to the photograph."
+      },
+      {
+        role: "user",
+        content: prompt
+      }
+    ],
+    image: imageData,
+    max_tokens: 1400,
+    temperature: 0.05,
+    top_p: 0.8,
+    stream: false
+  };
+
+  if (useSchema) {
+    input.response_format = {
+      type: "json_schema",
+      json_schema: AI_FINDINGS_JSON_SCHEMA
+    };
+  } else {
+    input.response_format = {
+      type: "json_object"
+    };
+  }
+
+  return env.AI.run(MODEL, input);
 }
 
 async function runAI(
@@ -451,67 +535,55 @@ async function runAI(
   image: ArrayBuffer,
   contentType: string,
   checks: SafetyCheck[]
-): Promise<{ raw: string; result: any }> {
+): Promise<{ raw: string; result: any; mode: string }> {
   const imageData = imageDataUrl(image, contentType);
+  const prompt = buildPrompt(checks);
 
   let response: any;
+  let mode = "json_schema";
+
   try {
-    response = await env.AI.run(
-      MODEL,
-      {
-        messages: [
-          {
-            role: "system",
-            content: "You are a careful Singapore workplace safety visual inspection assistant. Only report visible evidence. Return valid JSON only.",
-          },
-          {
-            role: "user",
-            content: buildPrompt(checks),
-          },
-        ],
-        image: imageData,
-        max_tokens: 1400,
-        temperature: 0.05,
-        top_p: 0.8,
-      } as any
+    response = await callVisionAI(
+      env,
+      imageData,
+      prompt,
+      true
     );
-  } catch (error) {
-    throw new Error(`Workers AI request failed: ${error instanceof Error ? error.message : String(error)}`);
+  } catch (firstError) {
+    /*
+     * Workers AI documents that JSON Schema can fail in extreme cases.
+     * Retry once with simpler JSON Object mode rather than falling back
+     * immediately to arbitrary natural-language output.
+     */
+    mode = "json_object_fallback";
+
+    try {
+      response = await callVisionAI(
+        env,
+        imageData,
+        prompt + "\\nReturn a JSON object with exactly one top-level property named findings.",
+        false
+      );
+    } catch (secondError) {
+      throw new Error(
+        `Workers AI structured JSON request failed. JSON Schema error: ${firstError instanceof Error ? firstError.message : String(firstError)}. JSON Object fallback error: ${secondError instanceof Error ? secondError.message : String(secondError)}`
+      );
+    }
   }
 
-  /*
-   * Workers AI may return either:
-   *
-   *   { response: "{ ...json... }" }
-   *
-   * or, with structured output/tool calling:
-   *
-   *   { response: { findings: [...] }, tool_calls: [...] }
-   *
-   * The v2.3 parser only accepted a string. That caused a valid
-   * structured response to be reported as "returned no text".
-   */
-  let raw = "";
-
-  if (typeof response === "string") {
-    raw = response;
-  } else if (typeof response?.response === "string") {
-    raw = response.response;
-  } else if (response?.response && typeof response.response === "object") {
-    raw = JSON.stringify(response.response);
-  } else if (typeof response?.result === "string") {
-    raw = response.result;
-  } else if (response?.result && typeof response.result === "object") {
-    raw = JSON.stringify(response.result);
-  } else if (response?.findings && Array.isArray(response.findings)) {
-    raw = JSON.stringify({ findings: response.findings });
-  }
+  const raw = responseToRawAI(response);
 
   if (!raw.trim()) {
-    throw new Error(`Workers AI returned no usable response. Response: ${JSON.stringify(response).substring(0, 3000)}`);
+    throw new Error(
+      `Workers AI returned no usable structured response. Response: ${JSON.stringify(response).substring(0, 3000)}`
+    );
   }
 
-  return { raw: raw.trim(), result: response };
+  return {
+    raw: raw.trim(),
+    result: response,
+    mode
+  };
 }
 
 function extractJson(text: string): any | null {
@@ -1243,7 +1315,7 @@ function parseStructuredAIResponse(raw: string): Array<{
   if (legacy.length) return legacy;
 
   throw new Error(
-    `Scene analysis returned no usable findings. Raw AI output: ${raw.substring(0, 5000)}`
+    `Scene analysis returned no usable structured findings. Raw AI output: ${raw.substring(0, 5000)}`
   );
 }
 
@@ -1946,6 +2018,7 @@ async function analyze(request: Request, env: Env): Promise<Response> {
         embedding_model: EMBEDDING_MODEL,
         vectorize_index: "safety-checks",
         vector_match_threshold: VECTOR_MATCH_THRESHOLD,
+        structured_output_mode: ai.mode,
         response_length: ai.raw.length,
         response_preview: ai.raw.substring(0, 3000),
       },
@@ -2116,7 +2189,7 @@ async function health(env: Env): Promise<Response> {
   return jsonResponse({
     ok: database && safetyChecks && r2 && vectorize && checklist,
     worker: "depot-safety",
-    version: "2.5",
+    version: "2.6",
     model: MODEL,
     embedding_model: EMBEDDING_MODEL,
     database,
