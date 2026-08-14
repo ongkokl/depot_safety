@@ -1,2655 +1,2047 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0, maximum-scale=1.0"
-  >
-
-  <meta
-    name="theme-color"
-    content="#12324d"
-  >
-
-  <title>Safety Inspection AI</title>
-
-  <style>
-    * {
-      box-sizing: border-box;
-    }
-
-    html {
-      scroll-behavior: smooth;
-    }
-
-    body {
-      margin: 0;
-      background: #f3f7fa;
-      color: #172333;
-      font-family:
-        -apple-system,
-        BlinkMacSystemFont,
-        "Segoe UI",
-        Roboto,
-        Arial,
-        sans-serif;
-    }
-
-    /* =====================================================
-       HEADER
-       ===================================================== */
-
-    .header {
-      position: sticky;
-      top: 0;
-      z-index: 1000;
-
-      background: #12324d;
-      color: white;
-
-      padding:
-        18px
-        18px
-        17px;
-
-      box-shadow:
-        0 2px 8px rgba(0, 0, 0, 0.12);
-    }
-
-    .header-inner {
-      max-width: 900px;
-      margin: auto;
-    }
-
-    .header-title {
-      margin: 0;
-      font-size: 27px;
-      line-height: 1.15;
-      font-weight: 750;
-    }
-
-    .header-subtitle {
-      margin-top: 4px;
-      font-size: 15px;
-      color: #cbd9e5;
-    }
-
-    /* =====================================================
-       PAGE
-       ===================================================== */
-
-    .page {
-      width: 100%;
-      max-width: 900px;
-      margin: auto;
-      padding: 18px 16px 40px;
-    }
-
-    .card {
-      background: white;
-      border-radius: 22px;
-      margin-bottom: 18px;
-      padding: 20px;
-
-      box-shadow:
-        0 1px 2px rgba(0, 0, 0, 0.04),
-        0 4px 18px rgba(20, 50, 80, 0.06);
-
-      border: 1px solid #e1e9ef;
-    }
-
-    .section-title {
-      margin: 0 0 18px;
-      font-size: 27px;
-      line-height: 1.2;
-    }
-
-    /* =====================================================
-       UPLOAD
-       ===================================================== */
-
-    .upload-area {
-      width: 100%;
-    }
-
-    .upload-button {
-      width: 100%;
-      min-height: 54px;
-
-      border: 2px dashed #aac1d2;
-      border-radius: 16px;
-
-      background: #f7fafc;
-      color: #205f8b;
-
-      font-size: 17px;
-      font-weight: 700;
-
-      cursor: pointer;
-
-      display: flex;
-      align-items: center;
-      justify-content: center;
-
-      padding: 15px;
-    }
-
-    .upload-button:active {
-      transform: scale(0.99);
-    }
-
-    #photoInput {
-      display: none;
-    }
-
-    .preview-container {
-      display: none;
-      margin-top: 16px;
-    }
-
-    .preview-container.visible {
-      display: block;
-    }
-
-    .preview-wrapper {
-      position: relative;
-      width: 100%;
-
-      background: #111;
-
-      border-radius: 18px;
-      overflow: hidden;
-
-      text-align: center;
-    }
-
-    #photoPreview {
-      display: block;
-
-      width: 100%;
-      max-height: 620px;
-
-      object-fit: contain;
-      margin: auto;
-    }
-
-    .photo-info {
-      padding: 9px 12px;
-
-      color: #d8e1e8;
-      background: #16202a;
-
-      font-size: 13px;
-    }
-
-    .change-photo {
-      width: 100%;
-      margin-top: 10px;
-
-      border: 1px solid #b8c8d4;
-      background: white;
-
-      color: #205f8b;
-
-      border-radius: 12px;
-
-      padding: 12px;
-
-      font-size: 15px;
-      font-weight: 650;
-
-      cursor: pointer;
-    }
-
-    /* =====================================================
-       FORM
-       ===================================================== */
-
-    .field {
-      margin-top: 18px;
-    }
-
-    .field:first-child {
-      margin-top: 0;
-    }
-
-    .field label {
-      display: block;
-
-      margin-bottom: 8px;
-
-      font-size: 17px;
-      font-weight: 700;
-    }
-
-    .field input {
-      width: 100%;
-
-      min-height: 60px;
-
-      border: 1px solid #cbd7df;
-      border-radius: 14px;
-
-      background: white;
-
-      padding: 14px 17px;
-
-      font-size: 18px;
-
-      color: #172333;
-
-      outline: none;
-    }
-
-    .field input:focus {
-      border-color: #17699c;
-
-      box-shadow:
-        0 0 0 3px
-        rgba(23, 105, 156, 0.12);
-    }
-
-    /* =====================================================
-       ANALYSE BUTTON
-       ===================================================== */
-
-    .analyse-button {
-      width: 100%;
-
-      margin-top: 20px;
-
-      min-height: 66px;
-
-      border: none;
-      border-radius: 15px;
-
-      background: #17699c;
-      color: white;
-
-      font-size: 20px;
-      font-weight: 750;
-
-      cursor: pointer;
-
-      transition:
-        background 0.15s,
-        transform 0.1s;
-    }
-
-    .analyse-button:hover {
-      background: #125a87;
-    }
-
-    .analyse-button:active {
-      transform: scale(0.99);
-    }
-
-    .analyse-button:disabled {
-      background: #8ca6b7;
-      cursor: not-allowed;
-      transform: none;
-    }
-
-    /* =====================================================
-       LOADING
-       ===================================================== */
-
-    .loading-message {
-      display: none;
-
-      margin-top: 14px;
-
-      padding: 15px;
-
-      border-radius: 14px;
-
-      background: #eef6fb;
-      color: #205f8b;
-
-      font-size: 16px;
-      font-weight: 600;
-
-      text-align: center;
-    }
-
-    .loading-message.visible {
-      display: block;
-    }
-
-    .spinner {
-      display: inline-block;
-
-      width: 18px;
-      height: 18px;
-
-      border: 3px solid #c7dce9;
-      border-top-color: #17699c;
-
-      border-radius: 50%;
-
-      animation:
-        spin 0.8s linear infinite;
-
-      vertical-align: -4px;
-
-      margin-right: 8px;
-    }
-
-    @keyframes spin {
-      to {
-        transform: rotate(360deg);
-      }
-    }
-
-    /* =====================================================
-       MESSAGES
-       ===================================================== */
-
-    .message {
-      display: none;
-
-      margin-top: 14px;
-
-      padding: 16px;
-
-      border-radius: 15px;
-
-      font-size: 16px;
-      line-height: 1.45;
-    }
-
-    .message.visible {
-      display: block;
-    }
-
-    .message.success {
-      background: #edf9f0;
-      color: #24713d;
-    }
-
-    .message.error {
-      background: #fff0f0;
-      color: #a52f2f;
-    }
-
-    .message.loading {
-      background: #eef6fb;
-      color: #205f8b;
-    }
-
-    .message-title {
-      font-weight: 750;
-      margin-bottom: 3px;
-    }
-
-    /* =====================================================
-       INSPECTION RESULT
-       ===================================================== */
-
-    .result-card {
-      display: none;
-    }
-
-    .result-card.visible {
-      display: block;
-    }
-
-    .result-header {
-      display: flex;
-
-      align-items: center;
-      flex-wrap: wrap;
-
-      gap: 9px;
-
-      margin-bottom: 15px;
-    }
-
-    .result-status {
-      display: inline-flex;
-
-      align-items: center;
-
-      padding: 9px 13px;
-
-      border-radius: 999px;
-
-      font-weight: 750;
-      font-size: 17px;
-    }
-
-    .result-status.pass {
-      background: #dff5e5;
-      color: #21753c;
-    }
-
-    .result-status.check {
-      background: #fff0c5;
-      color: #795b00;
-    }
-
-    .result-status.fail {
-      background: #ffe0e0;
-      color: #a32626;
-    }
-
-    .inspection-no {
-      color: #66727d;
-      font-size: 15px;
-    }
-
-    .summary {
-      color: #66727d;
-
-      font-size: 17px;
-      line-height: 1.45;
-
-      margin-bottom: 18px;
-    }
-
-    /* =====================================================
-       FINDING
-       ===================================================== */
-
-    .finding {
-      border: 1px solid #d9e1e7;
-
-      border-radius: 17px;
-
-      padding: 18px;
-
-      margin-top: 14px;
-
-      background: #fff;
-    }
-
-    .finding:first-child {
-      margin-top: 0;
-    }
-
-    .finding-title-row {
-      display: flex;
-
-      align-items: flex-start;
-      justify-content: space-between;
-
-      gap: 12px;
-    }
-
-    .finding-title {
-      margin: 0;
-
-      font-size: 20px;
-      line-height: 1.35;
-
-      font-weight: 750;
-    }
-
-    .finding-status {
-      flex-shrink: 0;
-
-      padding: 7px 10px;
-
-      border-radius: 999px;
-
-      font-size: 13px;
-      font-weight: 750;
-    }
-
-    .finding-status.pass {
-      background: #dff5e5;
-      color: #21753c;
-    }
-
-    .finding-status.check {
-      background: #fff0c5;
-      color: #795b00;
-    }
-
-    .finding-status.fail {
-      background: #ffe0e0;
-      color: #a32626;
-    }
-
-    .finding-meta {
-      margin-top: 12px;
-
-      font-size: 16px;
-    }
-
-    .category {
-      font-weight: 700;
-    }
-
-    .risk-low {
-      color: #24713d;
-    }
-
-    .risk-medium {
-      color: #8a6700;
-    }
-
-    .risk-high {
-      color: #a32626;
-    }
-
-    .observation {
-      margin-top: 14px;
-
-      color: #66727d;
-
-      font-size: 17px;
-      line-height: 1.5;
-    }
-
-    .wsh-section {
-      margin-top: 16px;
-
-      padding-top: 15px;
-
-      border-top: 1px solid #e1e6ea;
-    }
-
-    .wsh-label {
-      font-weight: 750;
-
-      margin-bottom: 7px;
-
-      font-size: 16px;
-    }
-
-    .wsh-text {
-      color: #66727d;
-
-      font-size: 16px;
-      line-height: 1.5;
-    }
-
-    .source {
-      margin-top: 14px;
-
-      font-size: 15px;
-    }
-
-    .source a {
-      color: #17699c;
-      text-decoration: underline;
-    }
-
-    .confidence {
-      margin-top: 9px;
-
-      color: #66727d;
-
-      font-size: 14px;
-    }
-
-    /* =====================================================
-       DISCLAIMER
-       ===================================================== */
-
-    .disclaimer {
-      margin-top: 18px;
-
-      color: #66727d;
-
-      font-size: 14px;
-      line-height: 1.45;
-    }
-
-    /* =====================================================
-       RECENT INSPECTIONS
-       ===================================================== */
-
-    .stats {
-      display: grid;
-
-      grid-template-columns:
-        repeat(3, 1fr);
-
-      gap: 10px;
-
-      margin-bottom: 18px;
-    }
-
-    .stat {
-      background: #f5f8fa;
-
-      border-radius: 15px;
-
-      padding: 15px 10px;
-    }
-
-    .stat-label {
-      color: #66727d;
-
-      font-size: 14px;
-    }
-
-    .stat-number {
-      margin-top: 5px;
-
-      font-size: 29px;
-
-      font-weight: 750;
-    }
-
-    .recent-item {
-      border: 1px solid #dce4e9;
-
-      border-radius: 16px;
-
-      padding: 16px;
-
-      margin-top: 12px;
-
-      background: white;
-    }
-
-    .recent-item:first-child {
-      margin-top: 0;
-    }
-
-    .recent-top {
-      display: flex;
-
-      align-items: center;
-      justify-content: space-between;
-
-      gap: 10px;
-    }
-
-    .recent-number {
-      font-size: 17px;
-      font-weight: 750;
-    }
-
-    .recent-status {
-      font-size: 13px;
-      font-weight: 750;
-
-      padding: 7px 10px;
-
-      border-radius: 999px;
-    }
-
-    .recent-status.pass {
-      background: #dff5e5;
-      color: #21753c;
-    }
-
-    .recent-status.check {
-      background: #fff0c5;
-      color: #795b00;
-    }
-
-    .recent-status.fail {
-      background: #ffe0e0;
-      color: #a32626;
-    }
-
-    .recent-date {
-      margin-top: 10px;
-
-      color: #66727d;
-
-      font-size: 14px;
-    }
-
-    .recent-location {
-      margin-top: 5px;
-
-      color: #66727d;
-
-      font-size: 15px;
-    }
-
-    .empty {
-      color: #66727d;
-
-      text-align: center;
-
-      padding: 20px 5px;
-    }
-
-    /* =====================================================
-       FOOTER
-       ===================================================== */
-
-    .footer {
-      max-width: 900px;
-
-      margin: 0 auto;
-
-      padding: 0 16px 35px;
-
-      color: #66727d;
-
-      font-size: 13px;
-
-      line-height: 1.5;
-    }
-
-    /* =====================================================
-       MOBILE
-       ===================================================== */
-
-    @media (max-width: 600px) {
-
-      .header {
-        padding:
-          17px
-          16px
-          16px;
-      }
-
-      .header-title {
-        font-size: 25px;
-      }
-
-      .page {
-        padding:
-          14px
-          12px
-          30px;
-      }
-
-      .card {
-        padding: 18px;
-
-        border-radius: 20px;
-      }
-
-      .section-title {
-        font-size: 25px;
-      }
-
-      .finding-title-row {
-        display: block;
-      }
-
-      .finding-status {
-        display: inline-block;
-
-        margin-top: 10px;
-      }
-
-      .stats {
-        gap: 8px;
-      }
-
-      .stat {
-        padding: 13px 9px;
-      }
-
-      .stat-number {
-        font-size: 26px;
-      }
-
-      .recent-top {
-        align-items: flex-start;
-        flex-direction: column;
-      }
-    }
-  </style>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1, maximum-scale=1"
+    >
+
+    <meta
+        name="theme-color"
+        content="#123451"
+    >
+
+    <title>Safety Inspection AI</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            margin: 0;
+            background: #f3f7fa;
+            color: #142033;
+            font-family:
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                Roboto,
+                Arial,
+                sans-serif;
+            line-height: 1.55;
+        }
+
+        button,
+        input {
+            font: inherit;
+        }
+
+        .topbar {
+            background: #123451;
+            color: white;
+            padding: 22px 24px 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,.12);
+        }
+
+        .topbar-inner {
+            max-width: 1180px;
+            margin: 0 auto;
+        }
+
+        .app-title {
+            margin: 0;
+            font-size: 30px;
+            line-height: 1.15;
+            font-weight: 750;
+            letter-spacing: -.5px;
+        }
+
+        .app-subtitle {
+            margin-top: 5px;
+            font-size: 17px;
+            opacity: .82;
+        }
+
+        .container {
+            width: min(1100px, calc(100% - 28px));
+            margin: 20px auto 50px;
+        }
+
+        .card {
+            background: white;
+            border: 1px solid #dce4ea;
+            border-radius: 24px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 3px 15px rgba(20,40,60,.06);
+        }
+
+        .card h2 {
+            margin: 0 0 20px;
+            font-size: 30px;
+            line-height: 1.2;
+            letter-spacing: -.5px;
+        }
+
+        .card h3 {
+            margin: 0;
+        }
+
+        .upload-area {
+            border: 2px dashed #b8c8d4;
+            border-radius: 20px;
+            min-height: 230px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 22px;
+            cursor: pointer;
+            background: #f9fbfc;
+            transition:
+                border-color .2s,
+                background .2s;
+        }
+
+        .upload-area:hover {
+            border-color: #1c6796;
+            background: #f2f8fb;
+        }
+
+        .upload-icon {
+            font-size: 44px;
+            margin-bottom: 8px;
+        }
+
+        .upload-title {
+            font-size: 20px;
+            font-weight: 700;
+        }
+
+        .upload-description {
+            margin-top: 5px;
+            color: #687787;
+        }
+
+        #photoInput {
+            display: none;
+        }
+
+        .preview-wrapper {
+            display: none;
+            margin-top: 18px;
+        }
+
+        .preview-wrapper.visible {
+            display: block;
+        }
+
+        #imagePreview {
+            display: block;
+            width: 100%;
+            max-height: 500px;
+            object-fit: contain;
+            background: #111;
+            border-radius: 18px;
+        }
+
+        .field {
+            margin-top: 18px;
+        }
+
+        .field label {
+            display: block;
+            margin-bottom: 7px;
+            font-weight: 700;
+            font-size: 17px;
+        }
+
+        .field input {
+            width: 100%;
+            height: 58px;
+            padding: 0 18px;
+            border: 1px solid #cbd6de;
+            border-radius: 14px;
+            background: white;
+            color: #142033;
+            outline: none;
+        }
+
+        .field input:focus {
+            border-color: #1b6797;
+            box-shadow: 0 0 0 3px rgba(27,103,151,.12);
+        }
+
+        .analyse-button {
+            width: 100%;
+            min-height: 62px;
+            margin-top: 22px;
+            border: 0;
+            border-radius: 15px;
+            background: #176493;
+            color: white;
+            font-size: 21px;
+            font-weight: 750;
+            cursor: pointer;
+            transition:
+                background .2s,
+                transform .05s;
+        }
+
+        .analyse-button:hover {
+            background: #12547d;
+        }
+
+        .analyse-button:active {
+            transform: scale(.99);
+        }
+
+        .analyse-button:disabled {
+            background: #7895a7;
+            cursor: not-allowed;
+        }
+
+        .status-box {
+            display: none;
+            margin-top: 18px;
+            padding: 17px 19px;
+            border-radius: 16px;
+            font-weight: 600;
+            white-space: pre-wrap;
+        }
+
+        .status-box.visible {
+            display: block;
+        }
+
+        .status-box.loading {
+            background: #edf5fa;
+            color: #17587d;
+        }
+
+        .status-box.success {
+            background: #e8f9ef;
+            color: #08753d;
+        }
+
+        .status-box.error {
+            background: #fff0f0;
+            color: #a12929;
+        }
+
+        .result-card {
+            scroll-margin-top: 20px;
+        }
+
+        .result-header {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            flex-wrap: wrap;
+            margin-bottom: 17px;
+        }
+
+        .result-id {
+            color: #607181;
+            font-size: 16px;
+        }
+
+        .result-summary {
+            color: #526a7d;
+            font-size: 19px;
+            margin-bottom: 22px;
+        }
+
+        .result-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 9px;
+            padding: 9px 18px;
+            border-radius: 999px;
+            font-weight: 800;
+            font-size: 18px;
+        }
+
+        .result-dot {
+            width: 17px;
+            height: 17px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .badge-pass {
+            background: #d9f7e7;
+            color: #08753d;
+        }
+
+        .badge-pass .result-dot {
+            background: #12c984;
+        }
+
+        .badge-attention {
+            background: #ffe5e5;
+            color: #a62828;
+        }
+
+        .badge-attention .result-dot {
+            background: #ef4c4c;
+        }
+
+        .badge-check {
+            background: #fff1c9;
+            color: #7d5d00;
+        }
+
+        .badge-check .result-dot {
+            background: #f4bf28;
+        }
+
+        .finding {
+            border: 1px solid #d6e0e7;
+            border-radius: 20px;
+            padding: 22px;
+            margin-top: 17px;
+            background: #fff;
+        }
+
+        .finding-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 15px;
+        }
+
+        .finding-title {
+            margin: 0;
+            font-size: 23px;
+            line-height: 1.3;
+            color: #142033;
+        }
+
+        .finding-status {
+            flex-shrink: 0;
+            padding: 8px 14px;
+            border-radius: 999px;
+            font-size: 14px;
+            font-weight: 800;
+        }
+
+        .status-pass {
+            background: #d9f7e7;
+            color: #08753d;
+        }
+
+        .status-fail {
+            background: #ffe0e0;
+            color: #a12828;
+        }
+
+        .status-check {
+            background: #fff0bd;
+            color: #765900;
+        }
+
+        .finding-meta {
+            margin-top: 13px;
+            font-size: 17px;
+            color: #1a2837;
+        }
+
+        .category {
+            font-weight: 750;
+        }
+
+        .risk-low {
+            color: #087b41;
+        }
+
+        .risk-medium {
+            color: #866700;
+        }
+
+        .risk-high {
+            color: #ad2b2b;
+        }
+
+        .finding-observation {
+            margin-top: 16px;
+            font-size: 18px;
+            color: #5b7082;
+        }
+
+        .source {
+            margin-top: 18px;
+            font-size: 16px;
+        }
+
+        .source a {
+            color: #12649a;
+            text-decoration: underline;
+        }
+
+        .confidence {
+            margin-top: 8px;
+            color: #64798a;
+            font-size: 16px;
+        }
+
+        .verification-note {
+            margin-top: 26px;
+            padding-top: 20px;
+            border-top: 1px solid #e1e7ec;
+            color: #587084;
+            font-size: 16px;
+        }
+
+        .empty-result {
+            border: 1px solid #d6e0e7;
+            border-radius: 18px;
+            padding: 24px;
+            color: #617587;
+            font-size: 17px;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns:
+                repeat(3, 1fr);
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .stat {
+            background: #f2f7fa;
+            border-radius: 18px;
+            padding: 16px;
+        }
+
+        .stat-label {
+            color: #687a89;
+            font-size: 15px;
+        }
+
+        .stat-value {
+            margin-top: 3px;
+            font-size: 28px;
+            font-weight: 750;
+            color: #142033;
+        }
+
+        .inspection-list {
+            display: grid;
+            gap: 13px;
+        }
+
+        .inspection-item {
+            border: 1px solid #dbe3e9;
+            border-radius: 18px;
+            padding: 18px;
+            cursor: pointer;
+            background: white;
+        }
+
+        .inspection-item:hover {
+            background: #f8fafb;
+        }
+
+        .inspection-top {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .inspection-number {
+            font-size: 17px;
+            font-weight: 750;
+        }
+
+        .inspection-location {
+            margin-top: 7px;
+            color: #596d7d;
+        }
+
+        .inspection-date {
+            margin-top: 3px;
+            color: #718292;
+            font-size: 14px;
+        }
+
+        .small-badge {
+            padding: 7px 11px;
+            border-radius: 999px;
+            font-size: 13px;
+            font-weight: 750;
+            white-space: nowrap;
+        }
+
+        .loading-spinner {
+            width: 18px;
+            height: 18px;
+            border: 3px solid rgba(255,255,255,.4);
+            border-top-color: white;
+            border-radius: 50%;
+            display: inline-block;
+            vertical-align: middle;
+            animation: spin .8s linear infinite;
+            margin-right: 8px;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        @media (max-width: 700px) {
+            .topbar {
+                padding: 18px 20px;
+            }
+
+            .app-title {
+                font-size: 26px;
+            }
+
+            .container {
+                width: calc(100% - 20px);
+                margin-top: 12px;
+            }
+
+            .card {
+                border-radius: 20px;
+                padding: 20px;
+            }
+
+            .card h2 {
+                font-size: 27px;
+            }
+
+            .finding {
+                padding: 19px;
+            }
+
+            .finding-title {
+                font-size: 21px;
+            }
+
+            .finding-header {
+                flex-direction: column;
+            }
+
+            .finding-status {
+                align-self: flex-start;
+            }
+
+            .stats {
+                gap: 8px;
+            }
+
+            .stat {
+                padding: 13px;
+            }
+
+            .stat-label {
+                font-size: 13px;
+            }
+
+            .stat-value {
+                font-size: 25px;
+            }
+
+            .result-header {
+                gap: 9px;
+            }
+
+            .result-badge {
+                font-size: 16px;
+            }
+
+            .result-id {
+                font-size: 14px;
+            }
+        }
+    </style>
 </head>
 
 <body>
 
-  <!-- ===================================================
-       HEADER
-       =================================================== -->
+<header class="topbar">
+    <div class="topbar-inner">
+        <h1 class="app-title">
+            Safety Inspection AI
+        </h1>
 
-  <header class="header">
-
-    <div class="header-inner">
-
-      <h1 class="header-title">
-        Safety Inspection AI
-      </h1>
-
-      <div class="header-subtitle">
-        WSH-guided visual safety checks
-      </div>
-
+        <div class="app-subtitle">
+            WSH-guided visual safety checks
+        </div>
     </div>
+</header>
 
-  </header>
+<main class="container">
 
-
-  <!-- ===================================================
-       MAIN
-       =================================================== -->
-
-  <main class="page">
-
-    <!-- =================================================
+    <!-- =====================================================
          PHOTO UPLOAD
-         ================================================= -->
+         ===================================================== -->
 
     <section class="card">
 
-      <h2 class="section-title">
-        Safety Inspection
-      </h2>
-
-      <div class="upload-area">
+        <h2>
+            New Inspection
+        </h2>
 
         <label
-          class="upload-button"
-          for="photoInput"
+            class="upload-area"
+            for="photoInput"
+            id="uploadArea"
         >
-          📷 Select / Take Safety Photo
+            <div>
+                <div class="upload-icon">
+                    📷
+                </div>
+
+                <div class="upload-title">
+                    Take or select a photo
+                </div>
+
+                <div class="upload-description">
+                    Upload a workplace scene for AI-assisted
+                    safety inspection
+                </div>
+            </div>
         </label>
 
         <input
-          id="photoInput"
-          type="file"
-          accept="image/*"
-          capture="environment"
+            type="file"
+            id="photoInput"
+            accept="image/*"
+            capture="environment"
         >
 
         <div
-          id="previewContainer"
-          class="preview-container"
+            class="preview-wrapper"
+            id="previewWrapper"
         >
-
-          <div class="preview-wrapper">
-
             <img
-              id="photoPreview"
-              alt="Safety inspection photo"
+                id="imagePreview"
+                alt="Selected inspection photo"
             >
-
-            <div
-              id="photoInfo"
-              class="photo-info"
-            ></div>
-
-          </div>
-
-          <button
-            id="changePhotoButton"
-            class="change-photo"
-            type="button"
-          >
-            Change Photo
-          </button>
-
         </div>
 
-      </div>
+        <div class="field">
+            <label for="location">
+                Location
+            </label>
 
+            <input
+                type="text"
+                id="location"
+                placeholder="e.g. Depot P10"
+                autocomplete="off"
+            >
+        </div>
 
-      <!-- ===============================================
-           LOCATION
-           =============================================== -->
+        <div class="field">
+            <label for="inspector">
+                Inspector
+            </label>
 
-      <div class="field">
+            <input
+                type="text"
+                id="inspector"
+                placeholder="Inspector name"
+                autocomplete="name"
+            >
+        </div>
 
-        <label for="location">
-          Location
-        </label>
-
-        <input
-          id="location"
-          type="text"
-          placeholder="e.g. Depot P10"
-          autocomplete="off"
+        <button
+            type="button"
+            class="analyse-button"
+            id="analyzeButton"
         >
+            🔍 Analyse Photo
+        </button>
 
-      </div>
-
-
-      <!-- ===============================================
-           INSPECTOR
-           =============================================== -->
-
-      <div class="field">
-
-        <label for="inspector">
-          Inspector
-        </label>
-
-        <input
-          id="inspector"
-          type="text"
-          placeholder="Inspector name"
-          autocomplete="name"
-        >
-
-      </div>
-
-
-      <!-- ===============================================
-           ANALYSE
-           =============================================== -->
-
-      <button
-        id="analyseButton"
-        class="analyse-button"
-        type="button"
-      >
-        Analyse Photo
-      </button>
-
-
-      <!-- ===============================================
-           LOADING
-           =============================================== -->
-
-      <div
-        id="loadingMessage"
-        class="loading-message"
-      >
-        <span class="spinner"></span>
-        AI is analysing the photo...
-      </div>
-
-
-      <!-- ===============================================
-           MESSAGE
-           =============================================== -->
-
-      <div
-        id="message"
-        class="message"
-      ></div>
+        <div
+            id="statusBox"
+            class="status-box"
+        ></div>
 
     </section>
 
 
-    <!-- =================================================
+    <!-- =====================================================
          INSPECTION RESULT
-         ================================================= -->
+         ===================================================== -->
 
     <section
-      id="resultCard"
-      class="card result-card"
+        class="card result-card"
+        id="resultCard"
     >
 
-      <h2 class="section-title">
-        Inspection Result
-      </h2>
+        <h2>
+            Inspection Result
+        </h2>
 
-      <div
-        id="resultHeader"
-        class="result-header"
-      ></div>
-
-      <div
-        id="resultSummary"
-        class="summary"
-      ></div>
-
-      <div
-        id="findingsContainer"
-      ></div>
-
-      <div class="disclaimer">
-        AI findings are assistance for inspection.
-        Physical/site verification is required before
-        recording a compliance decision.
-      </div>
+        <div
+            id="resultContent"
+        >
+            <div class="empty-result">
+                Upload a workplace photo and select
+                <strong>Analyse Photo</strong> to begin.
+            </div>
+        </div>
 
     </section>
 
 
-    <!-- =================================================
+    <!-- =====================================================
          RECENT INSPECTIONS
-         ================================================= -->
+         ===================================================== -->
 
     <section class="card">
 
-      <h2 class="section-title">
-        Recent Inspections
-      </h2>
+        <h2>
+            Recent Inspections
+        </h2>
 
+        <div
+            class="stats"
+            id="stats"
+        >
+            <div class="stat">
+                <div class="stat-label">
+                    Inspections
+                </div>
 
-      <div class="stats">
+                <div
+                    class="stat-value"
+                    id="statInspections"
+                >
+                    0
+                </div>
+            </div>
 
-        <div class="stat">
+            <div class="stat">
+                <div class="stat-label">
+                    Attention
+                </div>
 
-          <div class="stat-label">
-            Inspections
-          </div>
+                <div
+                    class="stat-value"
+                    id="statAttention"
+                >
+                    0
+                </div>
+            </div>
 
-          <div
-            id="statInspections"
-            class="stat-number"
-          >
-            0
-          </div>
+            <div class="stat">
+                <div class="stat-label">
+                    Check required
+                </div>
 
+                <div
+                    class="stat-value"
+                    id="statCheck"
+                >
+                    0
+                </div>
+            </div>
         </div>
 
-
-        <div class="stat">
-
-          <div class="stat-label">
-            Attention
-          </div>
-
-          <div
-            id="statAttention"
-            class="stat-number"
-          >
-            0
-          </div>
-
+        <div
+            class="inspection-list"
+            id="inspectionList"
+        >
+            <div class="empty-result">
+                Loading inspections...
+            </div>
         </div>
-
-
-        <div class="stat">
-
-          <div class="stat-label">
-            Check required
-          </div>
-
-          <div
-            id="statCheck"
-            class="stat-number"
-          >
-            0
-          </div>
-
-        </div>
-
-      </div>
-
-
-      <div id="recentContainer">
-
-        <div class="empty">
-          Loading recent inspections...
-        </div>
-
-      </div>
 
     </section>
 
-  </main>
+</main>
 
 
-  <!-- ===================================================
-       FOOTER
-       =================================================== -->
+<script>
+"use strict";
 
-  <footer class="footer">
+/* =========================================================
+   ELEMENTS
+   ========================================================= */
 
-    AI findings are intended to support workplace safety
-    inspections and do not replace a competent person's
-    assessment, risk assessment, site rules or applicable
-    WSH requirements.
-
-  </footer>
-
-
-  <script>
-
-    /* ===================================================
-       GLOBAL VARIABLES
-       =================================================== */
-
-    let selectedFile = null;
-
-
-    /* ===================================================
-       DOM ELEMENTS
-       =================================================== */
-
-    const photoInput =
-      document.getElementById(
+const photoInput =
+    document.getElementById(
         "photoInput"
-      );
+    );
 
-    const photoPreview =
-      document.getElementById(
-        "photoPreview"
-      );
+const imagePreview =
+    document.getElementById(
+        "imagePreview"
+    );
 
-    const previewContainer =
-      document.getElementById(
-        "previewContainer"
-      );
+const previewWrapper =
+    document.getElementById(
+        "previewWrapper"
+    );
 
-    const photoInfo =
-      document.getElementById(
-        "photoInfo"
-      );
+const uploadArea =
+    document.getElementById(
+        "uploadArea"
+    );
 
-    const changePhotoButton =
-      document.getElementById(
-        "changePhotoButton"
-      );
-
-    const analyseButton =
-      document.getElementById(
-        "analyseButton"
-      );
-
-    const locationInput =
-      document.getElementById(
+const locationInput =
+    document.getElementById(
         "location"
-      );
+    );
 
-    const inspectorInput =
-      document.getElementById(
+const inspectorInput =
+    document.getElementById(
         "inspector"
-      );
+    );
 
-    const loadingMessage =
-      document.getElementById(
-        "loadingMessage"
-      );
+const analyzeButton =
+    document.getElementById(
+        "analyzeButton"
+    );
 
-    const message =
-      document.getElementById(
-        "message"
-      );
+const statusBox =
+    document.getElementById(
+        "statusBox"
+    );
 
-    const resultCard =
-      document.getElementById(
+const resultCard =
+    document.getElementById(
         "resultCard"
-      );
+    );
 
-    const resultHeader =
-      document.getElementById(
-        "resultHeader"
-      );
+const resultContent =
+    document.getElementById(
+        "resultContent"
+    );
 
-    const resultSummary =
-      document.getElementById(
-        "resultSummary"
-      );
+const inspectionList =
+    document.getElementById(
+        "inspectionList"
+    );
 
-    const findingsContainer =
-      document.getElementById(
-        "findingsContainer"
-      );
+const statInspections =
+    document.getElementById(
+        "statInspections"
+    );
 
-    const recentContainer =
-      document.getElementById(
-        "recentContainer"
-      );
+const statAttention =
+    document.getElementById(
+        "statAttention"
+    );
+
+const statCheck =
+    document.getElementById(
+        "statCheck"
+    );
 
 
-    /* ===================================================
-       FILE SELECT
-       =================================================== */
+let selectedFile = null;
 
-    photoInput.addEventListener(
-      "change",
-      function () {
+
+/* =========================================================
+   PHOTO SELECTION
+   ========================================================= */
+
+photoInput.addEventListener(
+    "change",
+    function () {
 
         const file =
-          photoInput.files &&
-          photoInput.files[0];
+            this.files &&
+            this.files[0];
 
         if (!file) {
-          return;
+            selectedFile = null;
+
+            previewWrapper.classList.remove(
+                "visible"
+            );
+
+            return;
         }
 
         if (
-          !file.type ||
-          !file.type.startsWith(
-            "image/"
-          )
+            !file.type.startsWith(
+                "image/"
+            )
         ) {
-          showError(
-            "Please select an image file."
-          );
+            showError(
+                "Please select an image file."
+            );
 
-          photoInput.value = "";
+            this.value = "";
 
-          return;
+            selectedFile = null;
+
+            return;
         }
 
         selectedFile = file;
 
-        const objectUrl =
-          URL.createObjectURL(file);
-
-        photoPreview.src =
-          objectUrl;
-
-        photoPreview.onload =
-          function () {
-
-            URL.revokeObjectURL(
-              objectUrl
-            );
-
-          };
-
-        photoInfo.textContent =
-          `${file.name} • ${formatBytes(file.size)}`;
-
-        previewContainer.classList.add(
-          "visible"
-        );
-
-        hideMessage();
-
-        /*
-         * Scroll the preview into view
-         * on mobile.
-         */
-        setTimeout(
-          function () {
-
-            previewContainer.scrollIntoView({
-              behavior: "smooth",
-              block: "center"
-            });
-
-          },
-          100
-        );
-
-      }
-    );
-
-
-    /* ===================================================
-       CHANGE PHOTO
-       =================================================== */
-
-    changePhotoButton.addEventListener(
-      "click",
-      function () {
-
-        photoInput.value = "";
-
-        selectedFile = null;
-
-        previewContainer.classList.remove(
-          "visible"
-        );
-
-        photoPreview.removeAttribute(
-          "src"
-        );
-
-        photoInfo.textContent = "";
-
-        photoInput.click();
-
-      }
-    );
-
-
-    /* ===================================================
-       ANALYSE BUTTON
-       =================================================== */
-
-    analyseButton.addEventListener(
-      "click",
-      analysePhoto
-    );
-
-
-    /* ===================================================
-       BASE64 CONVERSION
-       =================================================== */
-
-    function fileToBase64(file) {
-
-      return new Promise(
-        function (resolve, reject) {
-
-          const reader =
+        const reader =
             new FileReader();
 
-          reader.onload =
-            function () {
+        reader.onload =
+            function (event) {
 
-              /*
-               * This returns:
-               *
-               * data:image/jpeg;base64,/9j/...
-               *
-               * Keep the COMPLETE data URL.
-               */
+                imagePreview.src =
+                    event.target.result;
 
-              resolve(
-                reader.result
-              );
-
+                previewWrapper.classList.add(
+                    "visible"
+                );
             };
 
-          reader.onerror =
-            function () {
-
-              reject(
-                new Error(
-                  "Unable to read the image."
-                )
-              );
-
-            };
-
-          reader.readAsDataURL(file);
-
-        }
-      );
-
+        reader.readAsDataURL(
+            file
+        );
     }
+);
 
 
-    /* ===================================================
-       ANALYSE PHOTO
-       =================================================== */
+/* =========================================================
+   DRAG / CLICK UPLOAD
+   ========================================================= */
 
-    async function analysePhoto() {
+uploadArea.addEventListener(
+    "dragover",
+    function (event) {
+        event.preventDefault();
 
-      if (!selectedFile) {
+        uploadArea.style.borderColor =
+            "#176493";
+    }
+);
 
-        showError(
-          "Please select a safety photo first."
-        );
+uploadArea.addEventListener(
+    "dragleave",
+    function () {
+        uploadArea.style.borderColor =
+            "";
+    }
+);
 
-        return;
-      }
+uploadArea.addEventListener(
+    "drop",
+    function (event) {
 
+        event.preventDefault();
 
-      /*
-       * Prevent duplicate requests.
-       */
+        uploadArea.style.borderColor =
+            "";
 
-      if (
-        analyseButton.disabled
-      ) {
-        return;
-      }
+        const file =
+            event.dataTransfer.files &&
+            event.dataTransfer.files[0];
 
+        if (!file) {
+            return;
+        }
 
-      try {
-
-        /*
-         * Clear old result.
-         */
-
-        resultCard.classList.remove(
-          "visible"
-        );
-
-        findingsContainer.innerHTML = "";
-
-        /*
-         * Disable button.
-         */
-
-        analyseButton.disabled = true;
-
-        analyseButton.textContent =
-          "Analysing...";
-
-
-        /*
-         * Show loading message.
-         */
-
-        showLoading(
-          "AI is analysing the safety photo..."
-        );
-
-
-        /*
-         * Convert image to Base64.
-         */
-
-        const base64 =
-          await fileToBase64(
-            selectedFile
-          );
-
-
-        /*
-         * Read form fields.
-         */
-
-        const location =
-          locationInput.value.trim();
-
-        const inspector =
-          inspectorInput.value.trim();
-
-
-        /*
-         * IMPORTANT
-         *
-         * The Worker expects JSON.
-         *
-         * Do NOT use FormData here.
-         *
-         * image MUST be a STRING.
-         */
-
-        const requestBody = {
-
-          image: base64,
-
-          location:
-            location ||
-            "Unspecified",
-
-          inspector:
-            inspector ||
-            "Unspecified",
-
-          fileName:
-            selectedFile.name ||
-            "inspection-photo.jpg",
-
-          contentType:
-            selectedFile.type ||
-            "image/jpeg"
-
-        };
-
-
-        console.log(
-          "Sending safety inspection request..."
-        );
-
-
-        /*
-         * Send to Cloudflare Worker.
-         */
-
-        const response =
-          await fetch(
-            "/api/analyze",
-            {
-
-              method: "POST",
-
-              headers: {
-
-                "Content-Type":
-                  "application/json",
-
-                "Accept":
-                  "application/json"
-
-              },
-
-              body:
-                JSON.stringify(
-                  requestBody
-                )
-
-            }
-          );
-
-
-        /*
-         * Read response as text first.
-         *
-         * This gives a better error if the Worker
-         * unexpectedly returns HTML.
-         */
-
-        const responseText =
-          await response.text();
-
-        let data = null;
-
-
-        try {
-
-          data =
-            JSON.parse(
-              responseText
+        if (
+            !file.type.startsWith(
+                "image/"
+            )
+        ) {
+            showError(
+                "Please drop an image file."
             );
 
-        } catch (jsonError) {
-
-          console.error(
-            "Invalid server response:",
-            responseText
-          );
-
-          throw new Error(
-            `Server returned invalid JSON (${response.status}).`
-          );
-
+            return;
         }
 
+        selectedFile = file;
 
-        /*
-         * Check Worker response.
-         */
+        const dataTransfer =
+            new DataTransfer();
 
-        /*
-         * Current Worker responses use `ok: true`.
-         * Keep compatibility with the older `success: true`
-         * response format as well.
-         */
-        if (
-          !response.ok ||
-          !data ||
-          !(
-            data.ok === true ||
-            data.success === true
-          )
-        ) {
-
-          throw new Error(
-            data?.detail ||
-            data?.error ||
-            "AI analysis failed."
-          );
-
-        }
-
-
-        console.log(
-          "Safety analysis completed:",
-          data
+        dataTransfer.items.add(
+            file
         );
 
+        photoInput.files =
+            dataTransfer.files;
+
+        const reader =
+            new FileReader();
+
+        reader.onload =
+            function (event) {
+
+                imagePreview.src =
+                    event.target.result;
+
+                previewWrapper.classList.add(
+                    "visible"
+                );
+            };
+
+        reader.readAsDataURL(
+            file
+        );
+    }
+);
+
+
+/* =========================================================
+   STATUS
+   ========================================================= */
+
+function showStatus(
+    message,
+    type
+) {
+    statusBox.textContent =
+        message;
+
+    statusBox.className =
+        "status-box visible " +
+        type;
+}
+
+
+function showError(
+    message
+) {
+    showStatus(
+        "❌ " + message,
+        "error"
+    );
+}
+
+
+/* =========================================================
+   ANALYSE PHOTO
+   ========================================================= */
+
+analyzeButton.addEventListener(
+    "click",
+    analyzePhoto
+);
+
+
+async function analyzePhoto() {
+
+    if (!selectedFile) {
+
+        showError(
+            "Please select a photo first."
+        );
+
+        return;
+    }
+
+    try {
+
+        analyzeButton.disabled =
+            true;
+
+        analyzeButton.innerHTML =
+            '<span class="loading-spinner"></span> AI analysing...';
+
+        showStatus(
+            "Analysing the workplace photo...",
+            "loading"
+        );
 
         /*
-         * Display result.
+         * IMPORTANT:
+         *
+         * Do not manually set Content-Type.
+         * Browser will create multipart/form-data
+         * boundary automatically.
+         */
+
+        const formData =
+            new FormData();
+
+        formData.append(
+            "image",
+            selectedFile
+        );
+
+        formData.append(
+            "location",
+            locationInput.value.trim() ||
+            "Unspecified"
+        );
+
+        formData.append(
+            "inspector",
+            inspectorInput.value.trim() ||
+            "Unspecified"
+        );
+
+        const response =
+            await fetch(
+                "/api/analyze",
+                {
+                    method: "POST",
+                    body: formData,
+
+                    cache: "no-store"
+                }
+            );
+
+        /*
+         * Read response safely.
+         */
+
+        const text =
+            await response.text();
+
+        let result;
+
+        try {
+            result =
+                JSON.parse(text);
+        } catch {
+            throw new Error(
+                "Server returned an invalid response: " +
+                text.substring(
+                    0,
+                    500
+                )
+            );
+        }
+
+        console.log(
+            "AI analysis response:",
+            result
+        );
+
+        if (
+            !response.ok ||
+            !result.ok
+        ) {
+
+            throw new Error(
+                result.error ||
+                "AI analysis failed."
+            );
+        }
+
+        /*
+         * Render result.
          */
 
         renderInspectionResult(
-          data
+            result
         );
 
-
-        /*
-         * Success message.
-         */
-
-        showSuccess(
-          "✓ Analysis completed."
+        showStatus(
+            "✓ Analysis completed.",
+            "success"
         );
 
-
         /*
-         * Refresh dashboard.
+         * Refresh recent inspections.
          */
 
-        await loadDashboard();
-
+        await loadRecentInspections();
 
         /*
          * Scroll to result.
          */
 
         setTimeout(
-          function () {
+            function () {
 
-            resultCard.scrollIntoView({
-              behavior: "smooth",
-              block: "start"
-            });
+                resultCard.scrollIntoView({
+                    behavior: "smooth",
+                    block: "start"
+                });
 
-          },
-          200
+            },
+            100
         );
 
-
-      } catch (error) {
+    } catch (error) {
 
         console.error(
-          "Safety analysis error:",
-          error
+            "AI analysis error:",
+            error
         );
 
+        const message =
+            error instanceof Error
+                ? error.message
+                : String(error);
 
         showError(
-          error?.message ||
-          "AI analysis failed."
+            message
         );
 
-
-        /*
-         * Make sure the result area does not
-         * show stale data.
-         */
-
-        resultCard.classList.remove(
-          "visible"
-        );
-
-
-      } finally {
-
-        analyseButton.disabled =
-          false;
-
-        analyseButton.textContent =
-          "Analyse Photo";
-
-        hideLoading();
-
-      }
-
-    }
-
-
-    /* ===================================================
-       RENDER INSPECTION RESULT
-       =================================================== */
-
-    function renderInspectionResult(
-      data
-    ) {
-
-      resultCard.classList.add(
-        "visible"
-      );
-
-
-      const inspection =
-        data.inspection || {};
-
-
-      const status =
-        normalizeStatus(
-          inspection.overall_result
-        );
-
-
-      const statusLabel =
-        statusLabelText(
-          status
-        );
-
-
-      const inspectionNo =
-        escapeHtml(
-          inspection.inspection_no ||
-          inspection.id ||
-          ""
-        );
-
-
-      resultHeader.innerHTML = `
-
-        <div
-          class="result-status ${status.css}"
-        >
-          ${status.icon}
-          ${status.label}
-        </div>
-
-        <div class="inspection-no">
-          ${inspectionNo}
-        </div>
-
-      `;
-
-
-      resultSummary.textContent =
-        data.summary ||
-        "Workplace scene analysed.";
-
-
-      findingsContainer.innerHTML = "";
-
-
-      const findings =
-        Array.isArray(
-          data.findings
-        )
-          ? data.findings
-          : [];
-
-
-      if (!findings.length) {
-
-        findingsContainer.innerHTML = `
-
-          <div class="finding">
-
-            <h3 class="finding-title">
-              No structured findings returned
-            </h3>
-
-            <div class="observation">
-              Physical/site verification is
-              required.
+        resultContent.innerHTML =
+            `
+            <div class="empty-result">
+                The new photo could not be analysed.
+                Please correct the error above and try again.
             </div>
+            `;
 
-          </div>
+    } finally {
 
-        `;
+        analyzeButton.disabled =
+            false;
 
-        return;
-      }
-
-
-      findings.forEach(
-        function (finding) {
-
-          findingsContainer.appendChild(
-            createFindingElement(
-              finding
-            )
-          );
-
-        }
-      );
-
+        analyzeButton.innerHTML =
+            "🔍 Analyse Photo";
     }
+}
 
 
-    /* ===================================================
-       CREATE FINDING
-       =================================================== */
+/* =========================================================
+   RESULT RENDERING
+   ========================================================= */
 
-    function createFindingElement(
-      finding
-    ) {
+function renderInspectionResult(
+    result
+) {
 
-      const div =
-        document.createElement(
-          "div"
-        );
+    const inspection =
+        result.inspection || {};
 
-      div.className =
-        "finding";
-
-
-      const status =
-        normalizeStatus(
-          finding.status
-        );
-
-
-      const risk =
-        normalizeRisk(
-          finding.risk_level
-        );
-
-
-      const confidence =
-        Number(
-          finding.confidence
-        );
-
-
-      const confidencePercent =
-        Number.isFinite(
-          confidence
+    const findings =
+        Array.isArray(
+            result.findings
         )
-          ? Math.round(
-              confidence <= 1
-                ? confidence * 100
-                : confidence
-            )
-          : 50;
-
-
-      const category =
-        escapeHtml(
-          finding.category ||
-          "Other"
-        );
-
-
-      const title =
-        escapeHtml(
-          finding.title ||
-          "Safety observation"
-        );
-
-
-      const observation =
-        escapeHtml(
-          finding.observation ||
-          "Physical/site verification required."
-        );
-
-
-      const check =
-        escapeHtml(
-          finding.wsh_check ||
-          ""
-        );
-
-
-      const guidance =
-        escapeHtml(
-          finding.guidance ||
-          ""
-        );
-
-
-      const sourceTitle =
-        escapeHtml(
-          finding.source_title ||
-          "WSH Council resources"
-        );
-
-
-      const sourceUrl =
-        safeUrl(
-          finding.source_url
-        );
-
-
-      div.innerHTML = `
-
-        <div class="finding-title-row">
-
-          <h3 class="finding-title">
-            ${title}
-          </h3>
-
-          <span
-            class="finding-status ${status.css}"
-          >
-            ${status.label}
-          </span>
-
-        </div>
-
-
-        <div class="finding-meta">
-
-          <span class="category">
-            ${category}
-          </span>
-
-          <span> · </span>
-
-          <span class="${risk.css}">
-            ${risk.label} risk
-          </span>
-
-          <span> · </span>
-
-          <span>
-            ${confidencePercent}% AI confidence
-          </span>
-
-        </div>
-
-
-        <div class="observation">
-          ${observation}
-        </div>
-
-
-        ${
-          check
-            ? `
-
-              <div class="wsh-section">
-
-                <div class="wsh-label">
-                  WSH check:
-                </div>
-
-                <div class="wsh-text">
-                  ${check}
-                </div>
-
-              </div>
-
-            `
-            : ""
-        }
-
-
-        ${
-          guidance
-            ? `
-
-              <div
-                class="wsh-text"
-                style="margin-top:10px;"
-              >
-                ${guidance}
-              </div>
-
-            `
-            : ""
-        }
-
-
-        <div class="source">
-
-          Source:
-
-          ${
-            sourceUrl
-              ? `
-
-                <a
-                  href="${sourceUrl}"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  ${sourceTitle}
-                </a>
-
-              `
-              : sourceTitle
-          }
-
-        </div>
-
-
-        <div class="confidence">
-
-          AI confidence:
-          ${confidencePercent}%
-
-        </div>
-
-      `;
-
-
-      return div;
-
-    }
-
-
-    /* ===================================================
-       LOAD DASHBOARD
-       =================================================== */
-
-    async function loadDashboard() {
-
-      try {
-
-        /*
-         * Load summary and recent inspections
-         * independently so one failure doesn't
-         * prevent the other.
-         */
-
-        await Promise.all([
-          loadSummary(),
-          loadRecentInspections()
-        ]);
-
-      } catch (error) {
-
-        console.error(
-          "Dashboard loading error:",
-          error
-        );
-
-      }
-
-    }
-
-
-    /* ===================================================
-       LOAD SUMMARY
-       =================================================== */
-
-    async function loadSummary() {
-
-      try {
-
-        const response =
-          await fetch(
-            "/api/summary",
-            {
-              method: "GET",
-              headers: {
-                "Accept":
-                  "application/json"
-              }
-            }
-          );
-
-
-        if (!response.ok) {
-          throw new Error(
-            `Summary HTTP ${response.status}`
-          );
-        }
-
-
-        const data =
-          await response.json();
-
-
-        if (
-          !data ||
-          !(
-            data.ok === true ||
-            data.success === true
-          )
-        ) {
-          return;
-        }
-
-
-        const summary =
-          data.summary || {};
-
-
-        document.getElementById(
-          "statInspections"
-        ).textContent =
-          Number(
-            summary.inspections || 0
-          );
-
-
-        document.getElementById(
-          "statAttention"
-        ).textContent =
-          Number(
-            summary.attention || 0
-          );
-
-
-        document.getElementById(
-          "statCheck"
-        ).textContent =
-          Number(
-            summary.check_required || 0
-          );
-
-
-      } catch (error) {
-
-        console.error(
-          "Summary error:",
-          error
-        );
-
-      }
-
-    }
-
-
-    /* ===================================================
-       LOAD RECENT INSPECTIONS
-       =================================================== */
-
-    async function loadRecentInspections() {
-
-      try {
-
-        const response =
-          await fetch(
-            "/api/inspections",
-            {
-              method: "GET",
-              headers: {
-                "Accept":
-                  "application/json"
-              }
-            }
-          );
-
-
-        if (!response.ok) {
-          throw new Error(
-            `Inspections HTTP ${response.status}`
-          );
-        }
-
-
-        const data =
-          await response.json();
-
-
-        if (
-          !data ||
-          !(
-            data.ok === true ||
-            data.success === true
-          )
-        ) {
-
-          throw new Error(
-            data?.error ||
-            "Unable to load inspections."
-          );
-
-        }
-
-
-        const inspections =
-          Array.isArray(
-            data.inspections
-          )
-            ? data.inspections
+            ? result.findings
             : [];
 
+    const counts =
+        result.counts || {};
 
-        if (!inspections.length) {
+    const overallResult =
+        inspection.overall_result ||
+        "CHECK_REQUIRED";
 
-          recentContainer.innerHTML = `
-
-            <div class="empty">
-              No inspections yet.
-            </div>
-
-          `;
-
-          return;
-        }
-
-
-        recentContainer.innerHTML = "";
-
-
-        inspections.forEach(
-          function (inspection) {
-
-            recentContainer.appendChild(
-              createRecentInspection(
-                inspection
-              )
-            );
-
-          }
+    const badge =
+        resultBadge(
+            overallResult
         );
 
+    let html =
+        `
+        <div class="result-header">
 
-      } catch (error) {
+            ${badge}
 
-        console.error(
-          "Recent inspections error:",
-          error
-        );
+            <span class="result-id">
+                ${escapeHtml(
+                    inspection.inspection_no ||
+                    ""
+                )}
+            </span>
 
+        </div>
 
-        recentContainer.innerHTML = `
-
-          <div class="empty">
-            Unable to load recent inspections.
-          </div>
-
+        <div class="result-summary">
+            ${escapeHtml(
+                result.summary ||
+                ""
+            )}
+        </div>
         `;
 
-      }
-
-    }
-
-
-    /* ===================================================
-       RECENT INSPECTION ELEMENT
-       =================================================== */
-
-    function createRecentInspection(
-      inspection
+    if (
+        findings.length === 0
     ) {
 
-      const div =
-        document.createElement(
-          "div"
+        html +=
+            `
+            <div class="empty-result">
+
+                <strong>
+                    No structured findings returned
+                </strong>
+
+                <div style="margin-top:8px">
+                    Physical/site verification is required.
+                </div>
+
+            </div>
+            `;
+
+    } else {
+
+        findings.forEach(
+            function (finding) {
+
+                html +=
+                    renderFinding(
+                        finding
+                    );
+            }
         );
+    }
 
-
-      div.className =
-        "recent-item";
-
-
-      const status =
-        normalizeStatus(
-          inspection.overall_result
-        );
-
-
-      const inspectionNo =
-        escapeHtml(
-          inspection.inspection_no ||
-          inspection.id ||
-          "-"
-        );
-
-
-      const date =
-        formatDate(
-          inspection.created_at
-        );
-
-
-      const location =
-        escapeHtml(
-          inspection.location ||
-          "Unspecified"
-        );
-
-
-      div.innerHTML = `
-
-        <div class="recent-top">
-
-          <div class="recent-number">
-            ${inspectionNo}
-          </div>
-
-          <div
-            class="recent-status ${status.css}"
-          >
-            ${status.icon}
-            ${status.label}
-          </div>
-
+    html +=
+        `
+        <div class="verification-note">
+            AI findings are assistance for inspection.
+            Physical/site verification is required before
+            recording a compliance decision.
         </div>
+        `;
+
+    resultContent.innerHTML =
+        html;
+}
 
 
-        <div class="recent-date">
-          ${date}
-        </div>
+/* =========================================================
+   RESULT BADGE
+   ========================================================= */
 
+function resultBadge(
+    result
+) {
 
-        <div class="recent-location">
-          ${location}
-        </div>
-
-      `;
-
-
-      return div;
-
-    }
-
-
-    /* ===================================================
-       STATUS
-       =================================================== */
-
-    function normalizeStatus(
-      value
+    if (
+        result === "PASS"
     ) {
 
-      const text =
-        String(
-          value || ""
-        )
-          .trim()
-          .toUpperCase();
-
-
-      if (
-        text === "FAIL" ||
-        text === "FAILED"
-      ) {
-
-        return {
-          label: "FAIL",
-          css: "fail",
-          icon: "🔴"
-        };
-
-      }
-
-
-      if (
-        text === "PASS" ||
-        text === "PASSED"
-      ) {
-
-        return {
-          label: "PASS",
-          css: "pass",
-          icon: "🟢"
-        };
-
-      }
-
-
-      if (
-        text === "ATTENTION"
-      ) {
-
-        return {
-          label: "ATTENTION",
-          css: "check",
-          icon: "🟠"
-        };
-
-      }
-
-
-      return {
-        label: "CHECK REQUIRED",
-        css: "check",
-        icon: "🟡"
-      };
+        return `
+            <span class="result-badge badge-pass">
+                <span class="result-dot"></span>
+                PASS
+            </span>
+        `;
 
     }
 
-
-    function statusLabelText(
-      status
+    if (
+        result === "ATTENTION"
     ) {
 
-      return status;
+        return `
+            <span class="result-badge badge-attention">
+                <span class="result-dot"></span>
+                ATTENTION
+            </span>
+        `;
 
     }
 
-
-    /* ===================================================
-       RISK
-       =================================================== */
-
-    function normalizeRisk(
-      value
-    ) {
-
-      const text =
-        String(
-          value || ""
-        )
-          .trim()
-          .toUpperCase();
+    return `
+        <span class="result-badge badge-check">
+            <span class="result-dot"></span>
+            CHECK REQUIRED
+        </span>
+    `;
+}
 
 
-      if (text === "HIGH") {
+/* =========================================================
+   FINDING CARD
+   ========================================================= */
 
-        return {
-          label: "HIGH",
-          css: "risk-high"
-        };
+function renderFinding(
+    finding
+) {
 
-      }
+    const status =
+        finding.status ||
+        "CHECK_REQUIRED";
 
+    const risk =
+        finding.risk_level ||
+        "MEDIUM";
 
-      if (text === "LOW") {
-
-        return {
-          label: "LOW",
-          css: "risk-low"
-        };
-
-      }
-
-
-      return {
-        label: "MEDIUM",
-        css: "risk-medium"
-      };
-
-    }
-
-
-    /* ===================================================
-       MESSAGES
-       =================================================== */
-
-    function showLoading(
-      text
-    ) {
-
-      loadingMessage.innerHTML = `
-
-        <span class="spinner"></span>
-
-        ${escapeHtml(text)}
-
-      `;
-
-      loadingMessage.classList.add(
-        "visible"
-      );
-
-    }
-
-
-    function hideLoading() {
-
-      loadingMessage.classList.remove(
-        "visible"
-      );
-
-    }
-
-
-    function showSuccess(
-      text
-    ) {
-
-      message.className =
-        "message success visible";
-
-
-      message.innerHTML = `
-
-        <div class="message-title">
-          ${escapeHtml(text)}
-        </div>
-
-      `;
-
-    }
-
-
-    function showError(
-      text
-    ) {
-
-      hideLoading();
-
-
-      message.className =
-        "message error visible";
-
-
-      message.innerHTML = `
-
-        <div class="message-title">
-          ❌ AI analysis failed.
-        </div>
-
-        <div>
-          ${escapeHtml(text)}
-        </div>
-
-      `;
-
-    }
-
-
-    function hideMessage() {
-
-      message.classList.remove(
-        "visible"
-      );
-
-      message.innerHTML = "";
-
-    }
-
-
-    /* ===================================================
-       FORMAT BYTES
-       =================================================== */
-
-    function formatBytes(
-      bytes
-    ) {
-
-      if (
-        !Number.isFinite(bytes) ||
-        bytes <= 0
-      ) {
-        return "0 KB";
-      }
-
-
-      const units = [
-        "B",
-        "KB",
-        "MB",
-        "GB"
-      ];
-
-
-      const i =
-        Math.floor(
-          Math.log(bytes) /
-          Math.log(1024)
+    const confidence =
+        Number(
+            finding.confidence
         );
 
+    const confidencePercent =
+        Number.isFinite(
+            confidence
+        )
+            ? Math.round(
+                confidence * 100
+            )
+            : 60;
 
-      const value =
-        bytes /
-        Math.pow(
-          1024,
-          i
-        );
+    let statusClass =
+        "status-check";
 
+    let statusText =
+        "CHECK REQUIRED";
 
-      return `${value.toFixed(
-        i === 0 ? 0 : 1
-      )} ${units[i]}`;
-
-    }
-
-
-    /* ===================================================
-       FORMAT DATE
-       =================================================== */
-
-    function formatDate(
-      value
+    if (
+        status === "PASS"
     ) {
 
-      if (!value) {
-        return "";
-      }
+        statusClass =
+            "status-pass";
 
+        statusText =
+            "PASS";
 
-      const date =
-        new Date(value);
-
-
-      if (
-        Number.isNaN(
-          date.getTime()
-        )
-      ) {
-
-        return escapeHtml(
-          String(value)
-        );
-
-      }
-
-
-      return date.toLocaleString(
-        "en-SG",
-        {
-          day: "2-digit",
-          month: "2-digit",
-          year: "numeric",
-          hour: "numeric",
-          minute: "2-digit",
-          hour12: true
-        }
-      );
-
-    }
-
-
-    /* ===================================================
-       SAFE HTML
-       =================================================== */
-
-    function escapeHtml(
-      value
+    } else if (
+        status === "FAIL"
     ) {
 
-      return String(
-        value ?? ""
-      )
-        .replace(
-          /&/g,
-          "&amp;"
-        )
-        .replace(
-          /</g,
-          "&lt;"
-        )
-        .replace(
-          />/g,
-          "&gt;"
-        )
-        .replace(
-          /"/g,
-          "&quot;"
-        )
-        .replace(
-          /'/g,
-          "&#039;"
-        );
+        statusClass =
+            "status-fail";
 
+        statusText =
+            "FAIL";
     }
 
+    let riskClass =
+        "risk-medium";
 
-    /* ===================================================
-       SAFE URL
-       =================================================== */
+    if (
+        risk === "LOW"
+    ) {
+        riskClass =
+            "risk-low";
+    } else if (
+        risk === "HIGH"
+    ) {
+        riskClass =
+            "risk-high";
+    }
 
-    function safeUrl(
-      value
+    let sourceHtml =
+        "";
+
+    if (
+        finding.source_url
     ) {
 
-      if (!value) {
-        return "";
-      }
+        sourceHtml =
+            `
+            <div class="source">
+                Source:
+                <a
+                    href="${escapeAttribute(
+                        finding.source_url
+                    )}"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                >
+                    ${escapeHtml(
+                        finding.source_title ||
+                        "WSH Council resources"
+                    )}
+                </a>
+            </div>
+            `;
+
+    } else if (
+        finding.source_title
+    ) {
+
+        sourceHtml =
+            `
+            <div class="source">
+                Source:
+                ${escapeHtml(
+                    finding.source_title
+                )}
+            </div>
+            `;
+    }
+
+    return `
+        <article class="finding">
+
+            <div class="finding-header">
+
+                <h3 class="finding-title">
+                    ${escapeHtml(
+                        finding.title ||
+                        "Safety observation"
+                    )}
+                </h3>
+
+                <span
+                    class="finding-status ${statusClass}"
+                >
+                    ${statusText}
+                </span>
+
+            </div>
+
+            <div class="finding-meta">
+
+                <span class="category">
+                    ${escapeHtml(
+                        finding.category ||
+                        "Other"
+                    )}
+                </span>
+
+                ·
+
+                <span class="${riskClass}">
+                    ${escapeHtml(
+                        risk
+                    )} risk
+                </span>
+
+                ·
+
+                ${confidencePercent}% AI confidence
+
+            </div>
+
+            <div class="finding-observation">
+                ${escapeHtml(
+                    finding.observation ||
+                    ""
+                )}
+            </div>
+
+            ${sourceHtml}
+
+            <div class="confidence">
+                AI confidence:
+                ${confidencePercent}%
+            </div>
+
+        </article>
+    `;
+}
 
 
-      try {
+/* =========================================================
+   RECENT INSPECTIONS
+   ========================================================= */
 
-        const url =
-          new URL(
-            value,
-            window.location.origin
-          );
+async function loadRecentInspections() {
 
+    try {
+
+        const response =
+            await fetch(
+                "/api/inspections",
+                {
+                    method: "GET",
+                    cache: "no-store"
+                }
+            );
 
         if (
-          url.protocol ===
-            "https:" ||
-          url.protocol ===
-            "http:"
+            !response.ok
         ) {
-
-          return escapeHtml(
-            url.href
-          );
-
+            throw new Error(
+                "Unable to load inspections."
+            );
         }
 
+        const result =
+            await response.json();
 
-      } catch (error) {
+        if (
+            !result.ok
+        ) {
+            throw new Error(
+                result.error ||
+                "Unable to load inspections."
+            );
+        }
 
-        return "";
+        const inspections =
+            Array.isArray(
+                result.inspections
+            )
+                ? result.inspections
+                : [];
 
-      }
+        renderRecentInspections(
+            inspections
+        );
+
+    } catch (error) {
+
+        console.error(
+            "Recent inspections error:",
+            error
+        );
+
+        inspectionList.innerHTML =
+            `
+            <div class="empty-result">
+                Unable to load recent inspections.
+            </div>
+            `;
+    }
+}
 
 
-      return "";
+/* =========================================================
+   RENDER RECENT INSPECTIONS
+   ========================================================= */
 
+function renderRecentInspections(
+    inspections
+) {
+
+    statInspections.textContent =
+        inspections.length;
+
+    const attention =
+        inspections.filter(
+            function (item) {
+
+                return (
+                    item.overall_result ===
+                    "ATTENTION"
+                );
+            }
+        ).length;
+
+    const checkRequired =
+        inspections.filter(
+            function (item) {
+
+                return (
+                    item.overall_result ===
+                    "CHECK_REQUIRED"
+                );
+            }
+        ).length;
+
+    statAttention.textContent =
+        attention;
+
+    statCheck.textContent =
+        checkRequired;
+
+    if (
+        inspections.length === 0
+    ) {
+
+        inspectionList.innerHTML =
+            `
+            <div class="empty-result">
+                No inspections found.
+            </div>
+            `;
+
+        return;
     }
 
+    inspectionList.innerHTML =
+        inspections
+            .map(
+                function (item) {
 
-    /* ===================================================
-       INITIAL LOAD
-       =================================================== */
+                    return renderInspectionItem(
+                        item
+                    );
+                }
+            )
+            .join("");
+}
 
-    document.addEventListener(
-      "DOMContentLoaded",
-      function () {
 
-        loadDashboard();
+/* =========================================================
+   RECENT INSPECTION ITEM
+   ========================================================= */
 
-      }
+function renderInspectionItem(
+    item
+) {
+
+    const result =
+        item.overall_result ||
+        "CHECK_REQUIRED";
+
+    let badgeClass =
+        "status-check";
+
+    let badgeText =
+        "CHECK REQUIRED";
+
+    if (
+        result === "PASS"
+    ) {
+
+        badgeClass =
+            "status-pass";
+
+        badgeText =
+            "PASS";
+
+    } else if (
+        result === "ATTENTION"
+    ) {
+
+        badgeClass =
+            "status-fail";
+
+        badgeText =
+            "ATTENTION";
+    }
+
+    const date =
+        formatDate(
+            item.created_at
+        );
+
+    return `
+        <div
+            class="inspection-item"
+            data-inspection-id="${escapeAttribute(
+                item.id || ""
+            )}"
+        >
+
+            <div class="inspection-top">
+
+                <div class="inspection-number">
+                    ${escapeHtml(
+                        item.inspection_no ||
+                        item.id ||
+                        ""
+                    )}
+                </div>
+
+                <span
+                    class="small-badge ${badgeClass}"
+                >
+                    ${badgeText}
+                </span>
+
+            </div>
+
+            <div class="inspection-date">
+                ${escapeHtml(
+                    date
+                )}
+            </div>
+
+            <div class="inspection-location">
+                ${escapeHtml(
+                    item.location ||
+                    "Unspecified"
+                )}
+            </div>
+
+        </div>
+    `;
+}
+
+
+/* =========================================================
+   DATE
+   ========================================================= */
+
+function formatDate(
+    value
+) {
+
+    if (!value) {
+        return "";
+    }
+
+    const date =
+        new Date(value);
+
+    if (
+        Number.isNaN(
+            date.getTime()
+        )
+    ) {
+        return value;
+    }
+
+    return date.toLocaleString(
+        undefined,
+        {
+            day: "2-digit",
+            month: "2-digit",
+            year: "numeric",
+            hour: "numeric",
+            minute: "2-digit"
+        }
     );
+}
 
-  </script>
+
+/* =========================================================
+   LOAD INSPECTION DETAIL
+   ========================================================= */
+
+inspectionList.addEventListener(
+    "click",
+    async function (event) {
+
+        const item =
+            event.target.closest(
+                ".inspection-item"
+            );
+
+        if (!item) {
+            return;
+        }
+
+        const id =
+            item.dataset.inspectionId;
+
+        if (!id) {
+            return;
+        }
+
+        await loadInspectionDetail(
+            id
+        );
+    }
+);
+
+
+async function loadInspectionDetail(
+    id
+) {
+
+    try {
+
+        showStatus(
+            "Loading inspection...",
+            "loading"
+        );
+
+        const response =
+            await fetch(
+                "/api/inspection/" +
+                encodeURIComponent(id),
+                {
+                    cache: "no-store"
+                }
+            );
+
+        const result =
+            await response.json();
+
+        if (
+            !response.ok ||
+            !result.ok
+        ) {
+            throw new Error(
+                result.error ||
+                "Unable to load inspection."
+            );
+        }
+
+        renderInspectionDetail(
+            result
+        );
+
+        showStatus(
+            "Inspection loaded.",
+            "success"
+        );
+
+        resultCard.scrollIntoView({
+            behavior: "smooth",
+            block: "start"
+        });
+
+    } catch (error) {
+
+        console.error(
+            error
+        );
+
+        showError(
+            error instanceof Error
+                ? error.message
+                : String(error)
+        );
+    }
+}
+
+
+/* =========================================================
+   INSPECTION DETAIL
+   ========================================================= */
+
+function renderInspectionDetail(
+    result
+) {
+
+    const inspection =
+        result.inspection || {};
+
+    const findings =
+        Array.isArray(
+            result.findings
+        )
+            ? result.findings
+            : [];
+
+    const resultType =
+        inspection.overall_result ||
+        "CHECK_REQUIRED";
+
+    let html =
+        `
+        <div class="result-header">
+
+            ${resultBadge(
+                resultType
+            )}
+
+            <span class="result-id">
+                ${escapeHtml(
+                    inspection.inspection_no ||
+                    ""
+                )}
+            </span>
+
+        </div>
+
+        <div class="result-summary">
+            ${escapeHtml(
+                findings.length
+                    ? `${findings.length} finding(s) recorded.`
+                    : "Physical/site verification is required."
+            )}
+        </div>
+        `;
+
+    if (
+        findings.length
+    ) {
+
+        findings.forEach(
+            function (finding) {
+
+                html +=
+                    renderFinding(
+                        finding
+                    );
+            }
+        );
+
+    } else {
+
+        html +=
+            `
+            <div class="empty-result">
+                No structured findings were recorded.
+                Physical/site verification is required.
+            </div>
+            `;
+    }
+
+    html +=
+        `
+        <div class="verification-note">
+            AI findings are assistance for inspection.
+            Physical/site verification is required before
+            recording a compliance decision.
+        </div>
+        `;
+
+    resultContent.innerHTML =
+        html;
+}
+
+
+/* =========================================================
+   HTML ESCAPING
+   ========================================================= */
+
+function escapeHtml(
+    value
+) {
+
+    return String(
+        value ?? ""
+    )
+        .replace(
+            /&/g,
+            "&amp;"
+        )
+        .replace(
+            /</g,
+            "&lt;"
+        )
+        .replace(
+            />/g,
+            "&gt;"
+        )
+        .replace(
+            /"/g,
+            "&quot;"
+        )
+        .replace(
+            /'/g,
+            "&#039;"
+        );
+}
+
+
+function escapeAttribute(
+    value
+) {
+
+    return escapeHtml(
+        value
+    );
+}
+
+
+/* =========================================================
+   INITIAL LOAD
+   ========================================================= */
+
+document.addEventListener(
+    "DOMContentLoaded",
+    function () {
+
+        /*
+         * Do not restore old inspection data
+         * from localStorage/sessionStorage.
+         *
+         * Always start with a clean inspection form.
+         */
+
+        selectedFile = null;
+
+        photoInput.value = "";
+
+        locationInput.value = "";
+
+        inspectorInput.value = "";
+
+        previewWrapper.classList.remove(
+            "visible"
+        );
+
+        statusBox.className =
+            "status-box";
+
+        statusBox.textContent =
+            "";
+
+        loadRecentInspections();
+    }
+);
+
+</script>
 
 </body>
 </html>
