@@ -2660,37 +2660,32 @@ function calculateOverall(
   findings: Finding[]
 ): string {
 
-  if (
-    findings.some(
-      finding =>
-        finding.status ===
-        "FAIL"
-    )
-  ) {
-
-    return "ATTENTION";
-
-  }
-
-
-  if (
-    findings.some(
-      finding =>
-        finding.status ===
-        "CHECK_REQUIRED"
-    )
-  ) {
-
+  // No findings means the AI did not produce
+  // a usable inspection result.
+  if (!findings || findings.length === 0) {
     return "CHECK_REQUIRED";
-
   }
 
+  if (
+    findings.some(
+      finding =>
+        finding.status === "FAIL"
+    )
+  ) {
+    return "ATTENTION";
+  }
+
+  if (
+    findings.some(
+      finding =>
+        finding.status === "CHECK_REQUIRED"
+    )
+  ) {
+    return "CHECK_REQUIRED";
+  }
 
   return "PASS";
-
 }
-
-
 /*
 ============================================================
 ANALYSE REQUEST
@@ -3105,6 +3100,37 @@ async function handleAnalyse(
 
   const findings =
     aiResult.findings
+    if (!findings.length) {
+
+  await updateInspection(
+    env.SAFETY_DB,
+    inspection.id,
+    "CHECK_REQUIRED"
+  );
+
+  return jsonResponse({
+    success: false,
+
+    error:
+      "AI completed the image analysis but returned no usable safety findings.",
+
+    inspection_id:
+      inspection.id,
+
+    inspection_no:
+      inspection.inspectionNo,
+
+    scene: {
+      summary:
+        scene.scene_summary,
+
+      relevant_categories:
+        scene.relevant_categories,
+    },
+
+    findings: [],
+  }, 422);
+}
       .map(
         finding => {
 
