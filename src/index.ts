@@ -892,15 +892,83 @@ async function runAI(
         } as any
       );
   } catch (error) {
-    throw new Error(
-      `Workers AI request error: ${
-        error instanceof Error
-          ? error.message
-          : String(error)
-      }`
+    const detail =
+      error instanceof Error
+        ? error.message
+        : String(error);
+
+    // Best-effort R2 cleanup.
+    if (
+      r2Uploaded &&
+      objectKey
+    ) {
+      try {
+        await env.PHOTOS.delete(
+          objectKey
+        );
+      } catch {
+        // Ignore cleanup failure.
+      }
+    }
+
+    // Best-effort inspection status update.
+    if (inspectionId) {
+      try {
+        await updateInspection(
+          env,
+          inspectionId,
+          "CHECK_REQUIRED"
+        );
+      } catch {
+        // Ignore secondary error.
+      }
+    }
+
+    // IMPORTANT:
+    // Put the actual diagnostic information
+    // into the main "error" property so that even
+    // the current index.html will display it.
+    const diagnostic =
+      [
+        "AI analysis failed.",
+        `Stage: ${stage}`,
+        `Detail: ${detail}`,
+        inspectionId
+          ? `Inspection ID: ${inspectionId}`
+          : "",
+        photoId
+          ? `Photo ID: ${photoId}`
+          : "",
+        objectKey
+          ? `R2 object: ${objectKey}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+    return jsonResponse(
+      {
+        ok: false,
+
+        error:
+          diagnostic,
+
+        stage,
+
+        detail,
+
+        inspectionId:
+          inspectionId || null,
+
+        photoId:
+          photoId || null,
+
+        objectKey:
+          objectKey || null,
+      },
+      500
     );
   }
-
   const raw =
     typeof response ===
     "string"
