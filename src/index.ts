@@ -5,14 +5,7 @@ export interface Env {
   VECTORIZE: VectorizeIndex;
   ASSETS: Fetcher;
 
-  /*
-   * Create this as a Cloudflare Worker secret:
-   *.
-   * VECTORIZE_SEED_KEY
-   *
-   * It is used only for the one-time Vectorize seed operation.
-   */
-  VECTORIZE_SEED_KEY?: string;
+  VECTORIZE_SEED_KEY: string;
 }
 
 const MODEL =
@@ -21,12 +14,15 @@ const MODEL =
 const EMBEDDING_MODEL =
   "@cf/baai/bge-base-en-v1.5";
 
+const VECTORIZE_INDEX =
+  "safety-checks";
+
 const MAX_IMAGE_SIZE =
   12 * 1024 * 1024;
 
 const MAX_FINDINGS = 8;
 
-const VECTOR_SEARCH_TOP_K = 6;
+const VECTOR_MATCH_THRESHOLD = 0.45;
 
 type Status =
   | "PASS"
@@ -58,6 +54,8 @@ interface Finding {
   check_id: string | null;
   source_title: string | null;
   source_url: string | null;
+
+  vector_score?: number | null;
 }
 
 interface PhotoInput {
@@ -108,20 +106,16 @@ function textResponse(
   text: string,
   status = 200
 ): Response {
-  return new Response(
-    text,
-    {
-      status,
+  return new Response(text, {
+    status,
+    headers: {
+      "Content-Type":
+        "text/plain; charset=utf-8",
 
-      headers: {
-        "Content-Type":
-          "text/plain; charset=utf-8",
-
-        "Access-Control-Allow-Origin":
-          "*",
-      },
-    }
-  );
+      "Access-Control-Allow-Origin":
+        "*",
+    },
+  });
 }
 
 /* =========================================================
@@ -157,10 +151,7 @@ function cleanMarkdown(
   value: unknown,
   max = 2000
 ): string {
-  return clean(
-    value,
-    max
-  )
+  return clean(value, max)
     .replace(/\*\*/g, "")
     .replace(/__/g, "")
     .replace(/^#+\s*/g, "")
@@ -203,29 +194,19 @@ function normalizeContentType(
       .split(";")[0]
       .trim();
 
-  if (
-    type === "image/png"
-  )
+  if (type === "image/png")
     return "image/png";
 
-  if (
-    type === "image/webp"
-  )
+  if (type === "image/webp")
     return "image/webp";
 
-  if (
-    type === "image/gif"
-  )
+  if (type === "image/gif")
     return "image/gif";
 
-  if (
-    type === "image/heic"
-  )
+  if (type === "image/heic")
     return "image/heic";
 
-  if (
-    type === "image/heif"
-  )
+  if (type === "image/heif")
     return "image/heif";
 
   return "image/jpeg";
@@ -234,9 +215,7 @@ function normalizeContentType(
 function extension(
   contentType: string
 ): string {
-  switch (
-    contentType
-  ) {
+  switch (contentType) {
     case "image/png":
       return "png";
 
@@ -286,8 +265,7 @@ function arrayBufferToBase64(
 
   let binary = "";
 
-  const chunkSize =
-    0x8000;
+  const chunkSize = 0x8000;
 
   for (
     let i = 0;
@@ -303,10 +281,9 @@ function arrayBufferToBase64(
         )
       );
 
-    binary +=
-      String.fromCharCode(
-        ...chunk
-      );
+    binary += String.fromCharCode(
+      ...chunk
+    );
   }
 
   return btoa(binary);
@@ -318,9 +295,7 @@ function imageDataUrl(
 ): string {
   return (
     `data:${contentType};base64,` +
-    arrayBufferToBase64(
-      bytes
-    )
+    arrayBufferToBase64(bytes)
   );
 }
 
@@ -346,9 +321,7 @@ async function parseRequest(
     const form =
       await request.formData();
 
-    let file:
-      | File
-      | null = null;
+    let file: File | null = null;
 
     const possibleNames = [
       "image",
@@ -358,8 +331,7 @@ async function parseRequest(
     ];
 
     for (
-      const name of
-        possibleNames
+      const name of possibleNames
     ) {
       const value =
         form.get(name);
@@ -374,8 +346,7 @@ async function parseRequest(
 
     if (!file) {
       for (
-        const [, value] of
-          form.entries()
+        const [, value] of form.entries()
       ) {
         if (
           value instanceof File
@@ -395,9 +366,7 @@ async function parseRequest(
     const bytes =
       await file.arrayBuffer();
 
-    if (
-      !bytes.byteLength
-    ) {
+    if (!bytes.byteLength) {
       throw new Error(
         "The uploaded image is empty."
       );
@@ -430,21 +399,15 @@ async function parseRequest(
 
       location:
         clean(
-          form.get(
-            "location"
-          ),
+          form.get("location"),
           200
-        ) ||
-        "Unspecified",
+        ) || "Unspecified",
 
       inspector:
         clean(
-          form.get(
-            "inspector"
-          ),
+          form.get("inspector"),
           200
-        ) ||
-        "Unspecified",
+        ) || "Unspecified",
     };
   }
 
@@ -465,8 +428,7 @@ async function parseRequest(
     body?.photo;
 
   if (
-    typeof base64 !==
-      "string" ||
+    typeof base64 !== "string" ||
     !base64.trim()
   ) {
     throw new Error(
@@ -524,9 +486,7 @@ async function parseRequest(
       binary.charCodeAt(i);
   }
 
-  if (
-    !bytes.byteLength
-  ) {
+  if (!bytes.byteLength) {
     throw new Error(
       "The image is empty."
     );
@@ -562,15 +522,13 @@ async function parseRequest(
       clean(
         body?.location,
         200
-      ) ||
-      "Unspecified",
+      ) || "Unspecified",
 
     inspector:
       clean(
         body?.inspector,
         200
-      ) ||
-      "Unspecified",
+      ) || "Unspecified",
   };
 }
 
@@ -610,13 +568,10 @@ async function getTableColumns(
       }>();
 
   return new Set(
-    (
-      result.results ||
-      []
-    ).map(
-      (row) =>
-        row.name
-    )
+    (result.results || [])
+      .map(
+        (row) => row.name
+      )
   );
 }
 
@@ -642,16 +597,13 @@ function buildInsert(
   }
 
   const selected =
-    Object.entries(
-      values
-    ).filter(
-      ([column]) =>
-        columns.has(column)
-    );
+    Object.entries(values)
+      .filter(
+        ([column]) =>
+          columns.has(column)
+      );
 
-  if (
-    !selected.length
-  ) {
+  if (!selected.length) {
     throw new Error(
       `No matching columns found in ${table}.`
     );
@@ -710,20 +662,21 @@ async function loadSafetyChecks(
   const missing =
     required.filter(
       (column) =>
-        !columns.has(
-          column
-        )
+        !columns.has(column)
     );
 
-  if (
-    missing.length
-  ) {
+  if (missing.length) {
     throw new Error(
       `safety_checks is missing columns: ${missing.join(
         ", "
       )}`
     );
   }
+
+  const activeFilter =
+    columns.has("active")
+      ? "WHERE active = 1"
+      : "";
 
   const result =
     await env.SAFETY_DB
@@ -738,450 +691,15 @@ async function loadSafetyChecks(
           source_url,
           keywords
         FROM safety_checks
-        WHERE active = 1
+        ${activeFilter}
         ORDER BY category, id
-        LIMIT 40
+        LIMIT 100
         `
       )
       .all<SafetyCheck>();
 
   return (
-    result.results ||
-    []
-  );
-}
-
-/* =========================================================
-   VECTORIZE
-   ========================================================= */
-
-function safetyCheckText(
-  check: SafetyCheck
-): string {
-  return [
-    `Category: ${check.category}`,
-
-    `Safety check: ${check.check_question}`,
-
-    `Guidance: ${check.guidance}`,
-
-    `Keywords: ${
-      check.keywords || ""
-    }`,
-  ].join("\n");
-}
-
-/* =========================================================
-   EMBEDDING
-   ========================================================= */
-
-async function createEmbedding(
-  env: Env,
-  text: string
-): Promise<number[]> {
-  const response =
-    await env.AI.run(
-      EMBEDDING_MODEL,
-      {
-        text: [text],
-      }
-    ) as any;
-
-  const values =
-    response?.data?.[0];
-
-  if (
-    !Array.isArray(values)
-  ) {
-    throw new Error(
-      `Embedding model returned an invalid response: ${JSON.stringify(
-        response
-      ).substring(0, 2000)}`
-    );
-  }
-
-  if (
-    values.length !== 768
-  ) {
-    throw new Error(
-      `Embedding dimension mismatch. Expected 768, received ${values.length}.`
-    );
-  }
-
-  return values;
-}
-
-/* =========================================================
-   VECTORIZE SEED
-   ========================================================= */
-
-async function seedVectorize(
-  request: Request,
-  env: Env
-): Promise<Response> {
-
-  /*
-   * Protect the endpoint.
-   *
-   * Create the Worker secret:
-   *
-   * VECTORIZE_SEED_KEY
-   *
-   * Then send:
-   *
-   * X-Vectorize-Seed-Key: your-secret
-   */
-
-  const configuredKey =
-    env.VECTORIZE_SEED_KEY;
-
-  if (
-    !configuredKey
-  ) {
-    return jsonResponse(
-      {
-        ok: false,
-
-        error:
-          "VECTORIZE_SEED_KEY is not configured. Create this Worker secret before running the seed operation.",
-      },
-      503
-    );
-  }
-
-  const suppliedKey =
-    request.headers.get(
-      "X-Vectorize-Seed-Key"
-    );
-
-  if (
-    !suppliedKey ||
-    suppliedKey !==
-      configuredKey
-  ) {
-    return jsonResponse(
-      {
-        ok: false,
-        error:
-          "Invalid or missing Vectorize seed key.",
-      },
-      401
-    );
-  }
-
-  try {
-    const checks =
-      await loadSafetyChecks(
-        env
-      );
-
-    if (
-      !checks.length
-    ) {
-      return jsonResponse(
-        {
-          ok: false,
-          error:
-            "No active safety checks found in D1.",
-        },
-        400
-      );
-    }
-
-    const vectors:
-      VectorizeVector[] = [];
-
-    for (
-      const check of checks
-    ) {
-
-      const text =
-        safetyCheckText(
-          check
-        );
-
-      const values =
-        await createEmbedding(
-          env,
-          text
-        );
-
-      vectors.push({
-        id: check.id,
-
-        values,
-
-        metadata: {
-          category:
-            check.category,
-
-          check_id:
-            check.id,
-
-          source_title:
-            check.source_title,
-
-          source_url:
-            check.source_url,
-
-          active: true,
-        },
-      });
-    }
-
-    /*
-     * Upsert is idempotent.
-     * Running seed again updates the same
-     * vector IDs rather than creating duplicates.
-     */
-
-    await env.VECTORIZE.upsert(
-      vectors
-    );
-
-    return jsonResponse({
-      ok: true,
-
-      message:
-        "Safety checks successfully indexed into Vectorize.",
-
-      index:
-        "safety-checks",
-
-      embedding_model:
-        EMBEDDING_MODEL,
-
-      dimensions:
-        768,
-
-      indexed:
-        vectors.length,
-
-      ids:
-        vectors.map(
-          (vector) =>
-            vector.id
-        ),
-    });
-
-  } catch (error) {
-
-    return jsonResponse(
-      {
-        ok: false,
-
-        error:
-          error instanceof Error
-            ? error.message
-            : String(error),
-      },
-      500
-    );
-  }
-}
-
-/* =========================================================
-   VECTORIZE SEARCH
-   ========================================================= */
-
-async function searchVectorize(
-  env: Env,
-  sceneDescription: string
-): Promise<SafetyCheck[]> {
-
-  if (
-    !env.VECTORIZE
-  ) {
-    return [];
-  }
-
-  const embedding =
-    await createEmbedding(
-      env,
-      sceneDescription
-    );
-
-  const matches =
-    await env.VECTORIZE.query(
-      embedding,
-      {
-        topK:
-          VECTOR_SEARCH_TOP_K,
-
-        returnMetadata:
-          "all",
-      }
-    );
-
-  const ids =
-    (
-      matches?.matches ||
-      []
-    )
-      .map(
-        (match: any) =>
-          String(
-            match.id
-          )
-      )
-      .filter(Boolean);
-
-  if (
-    !ids.length
-  ) {
-    return [];
-  }
-
-  const checks =
-    await loadSafetyChecks(
-      env
-    );
-
-  /*
-   * Preserve Vectorize ranking.
-   */
-
-  const byId =
-    new Map(
-      checks.map(
-        (check) => [
-          check.id,
-          check,
-        ]
-      )
-    );
-
-  const relevant =
-    ids
-      .map(
-        (id) =>
-          byId.get(id)
-      )
-      .filter(
-        (
-          check
-        ): check is SafetyCheck =>
-          !!check
-      );
-
-  return relevant;
-}
-
-/* =========================================================
-   VISUAL SCENE DESCRIPTION
-   ========================================================= */
-
-async function describeScene(
-  env: Env,
-  image: ArrayBuffer,
-  contentType: string
-): Promise<string> {
-
-  const imageData =
-    imageDataUrl(
-      image,
-      contentType
-    );
-
-  const prompt = `
-Describe only the visible workplace scene in this photograph.
-
-Do not assess safety.
-Do not give PASS or FAIL.
-Do not give safety recommendations.
-
-Identify only visible objects, people, activities and environmental context that may help select relevant workplace safety checks.
-
-Examples:
-- worker wearing helmet and high visibility vest
-- worker performing ground-level maintenance
-- container yard
-- vehicle or truck nearby
-- lifting equipment
-- suspended load
-- ladder or elevated platform
-- electrical equipment
-- fire equipment
-- stored materials
-- blocked access route
-- pedestrian walkway
-
-If something is not visible, do not mention it.
-
-Maximum 100 words.
-`.trim();
-
-  let response: any;
-
-  try {
-    response =
-      await env.AI.run(
-        MODEL,
-        {
-          messages: [
-            {
-              role:
-                "system",
-
-              content:
-                "Describe only visible objects and activities. Do not invent anything."
-            },
-
-            {
-              role:
-                "user",
-
-              content:
-                prompt,
-            },
-          ],
-
-          image:
-            imageData,
-
-          max_tokens:
-            180,
-
-          temperature:
-            0.05,
-
-          top_p:
-            0.8,
-        } as any
-      );
-  } catch (error) {
-    throw new Error(
-      `Scene description AI failed: ${
-        error instanceof Error
-          ? error.message
-          : String(error)
-      }`
-    );
-  }
-
-  const raw =
-    typeof response ===
-    "string"
-      ? response
-      : typeof response?.response ===
-        "string"
-      ? response.response
-      : typeof response?.result ===
-        "string"
-      ? response.result
-      : "";
-
-  if (
-    !raw.trim()
-  ) {
-    throw new Error(
-      "Scene description AI returned no text."
-    );
-  }
-
-  return cleanMarkdown(
-    raw,
-    1000
+    result.results || []
   );
 }
 
@@ -1190,10 +708,8 @@ Maximum 100 words.
    ========================================================= */
 
 function buildPrompt(
-  checks: SafetyCheck[],
-  sceneDescription: string
+  checks: SafetyCheck[]
 ): string {
-
   const available =
     checks
       .map(
@@ -1234,18 +750,11 @@ Do not invent hazards.
 
 Do not assume every safety category applies.
 
-The following is a preliminary description of the visible scene. It is provided only to help select relevant WSH checks:
-
-${sceneDescription}
-
-Use the WSH checks below as reference guidance.
-
-Only assess a category when there is visible evidence relevant to that category.
+Only report a category when there is visible evidence relevant to that category.
 
 If a category is not visibly relevant, OMIT it completely.
 
 IMPORTANT:
-
 Do NOT create findings such as:
 
 "No visible lifting operation"
@@ -1253,25 +762,32 @@ Do NOT create findings such as:
 "No visible electrical equipment"
 "No visible fire hazards"
 "No visible storage"
+"No visible hazard"
 
 These are NOT findings and must be omitted.
 
-CHECK_REQUIRED should only be used when a relevant safety condition IS visible but the photograph is insufficient to determine whether it is safe.
+PASS:
+Use PASS when the visible condition appears satisfactory.
 
-PASS means the visible condition appears satisfactory.
+FAIL:
+Use FAIL only when a visible unsafe condition is clearly identified.
 
-FAIL means a visible unsafe condition is identified.
+CHECK_REQUIRED:
+Use CHECK_REQUIRED only when a relevant safety condition is visible but the photograph does not provide enough evidence to determine compliance.
+
+Do NOT use CHECK_REQUIRED merely because a category is absent from the photograph.
 
 RISK:
-LOW = satisfactory/minor concern.
+LOW = satisfactory or minor concern.
 MEDIUM = potential safety concern.
 HIGH = serious visible safety concern.
 
-CONFIDENCE must be between 0 and 1.
+CONFIDENCE:
+Give a number between 0 and 1.
 
 Return only relevant visible findings.
 
-Use exactly this structure:
+Use exactly this format:
 
 **PPE**
 
@@ -1282,7 +798,7 @@ Use exactly this structure:
 * **Confidence:** 0.88
 * **Check ID:** ppe-001
 
-Then repeat for other relevant categories.
+Repeat for other relevant visible categories.
 
 Do not include explanations before or after the findings.
 
@@ -1293,25 +809,20 @@ ${available}
 }
 
 /* =========================================================
-   FINAL WORKERS AI ANALYSIS
+   WORKERS AI VISION
    ========================================================= */
 
 async function runAI(
   env: Env,
   image: ArrayBuffer,
   contentType: string,
-  checks: SafetyCheck[],
-  sceneDescription: string
+  checks: SafetyCheck[]
 ): Promise<{
   raw: string;
   result: any;
 }> {
-
   const prompt =
-    buildPrompt(
-      checks,
-      sceneDescription
-    );
+    buildPrompt(checks);
 
   const imageData =
     imageDataUrl(
@@ -1322,26 +833,20 @@ async function runAI(
   let response: any;
 
   try {
-
     response =
       await env.AI.run(
         MODEL,
         {
           messages: [
             {
-              role:
-                "system",
-
+              role: "system",
               content:
-                "You are a careful Singapore workplace safety visual inspection assistant. Only report visible evidence."
+                "You are a careful Singapore workplace safety visual inspection assistant. Only report visible evidence. Do not invent or assume hazards.",
             },
 
             {
-              role:
-                "user",
-
-              content:
-                prompt,
+              role: "user",
+              content: prompt,
             },
           ],
 
@@ -1358,9 +863,7 @@ async function runAI(
             0.8,
         } as any
       );
-
   } catch (error) {
-
     throw new Error(
       `Workers AI request failed: ${
         error instanceof Error
@@ -1382,13 +885,14 @@ async function runAI(
       ? response.result
       : "";
 
-  if (
-    !raw.trim()
-  ) {
+  if (!raw.trim()) {
     throw new Error(
       `Workers AI returned no text. Response: ${JSON.stringify(
         response
-      ).substring(0, 3000)}`
+      ).substring(
+        0,
+        3000
+      )}`
     );
   }
 
@@ -1402,13 +906,12 @@ async function runAI(
 }
 
 /* =========================================================
-   CONFIDENCE / STATUS / RISK
+   CONFIDENCE
    ========================================================= */
 
 function parseConfidence(
   value: string
 ): number {
-
   if (!value) {
     return 0.6;
   }
@@ -1438,7 +941,8 @@ function parseConfidence(
   if (
     number > 1
   ) {
-    number /= 100;
+    number /=
+      100;
   }
 
   return (
@@ -1454,11 +958,14 @@ function parseConfidence(
   );
 }
 
+/* =========================================================
+   STATUS / RISK
+   ========================================================= */
+
 function normalizeStatus(
   value: string,
   observation: string
 ): Status {
-
   const text =
     cleanMarkdown(
       value
@@ -1521,7 +1028,6 @@ function normalizeRisk(
   value: string,
   status: Status
 ): Risk {
-
   const text =
     cleanMarkdown(
       value
@@ -1552,65 +1058,20 @@ function normalizeRisk(
   }
 
   if (
-    status === "FAIL"
+    status ===
+    "FAIL"
   ) {
     return "HIGH";
   }
 
   if (
-    status === "PASS"
+    status ===
+    "PASS"
   ) {
     return "LOW";
   }
 
   return "MEDIUM";
-}
-
-/* =========================================================
-   IGNORE NON-VISIBLE FINDINGS
-   ========================================================= */
-
-function isNegativeVisibilityFinding(
-  category: string,
-  title: string,
-  observation: string
-): boolean {
-
-  const text =
-    `${category} ${title} ${observation}`
-      .toLowerCase()
-      .replace(
-        /\s+/g,
-        " "
-      );
-
-  const negativePatterns = [
-    "no visible",
-    "not visible",
-    "there is no visible",
-    "no evidence",
-    "cannot be determined",
-    "not observed",
-    "not apparent",
-    "no visible work at height",
-    "no visible lifting",
-    "no visible lifting operation",
-    "no visible electrical",
-    "no visible fire",
-    "no visible storage",
-    "no work at height",
-    "no lifting operation",
-    "no electrical equipment",
-    "no fire hazards",
-    "no storage hazards",
-  ];
-
-  return negativePatterns.some(
-    (pattern) =>
-      text.includes(
-        pattern
-      )
-  );
 }
 
 /* =========================================================
@@ -1620,7 +1081,6 @@ function isNegativeVisibilityFinding(
 function normalizeCategory(
   category: string
 ): string {
-
   const value =
     cleanMarkdown(
       category,
@@ -1636,7 +1096,8 @@ function normalizeCategory(
     value.toLowerCase();
 
   if (
-    lower === "ppe" ||
+    lower ===
+      "ppe" ||
     lower.includes(
       "personal protective"
     )
@@ -1713,7 +1174,55 @@ function normalizeCategory(
 }
 
 /* =========================================================
-   NEW AI PARSER
+   NEGATIVE VISIBILITY FILTER
+   ========================================================= */
+
+function isNegativeVisibilityFinding(
+  category: string,
+  title: string,
+  observation: string
+): boolean {
+  const text =
+    `${category} ${title} ${observation}`
+      .toLowerCase()
+      .replace(
+        /\s+/g,
+        " "
+      );
+
+  const negativePatterns = [
+    "no visible",
+    "not visible",
+    "there is no visible",
+    "no evidence",
+    "cannot be determined",
+    "not observed",
+    "not apparent",
+
+    "no visible work at height",
+    "no visible lifting",
+    "no visible lifting operation",
+    "no visible electrical",
+    "no visible fire",
+    "no visible storage",
+
+    "no work at height",
+    "no lifting operation",
+    "no electrical equipment",
+    "no fire hazards",
+    "no storage hazards",
+  ];
+
+  return negativePatterns.some(
+    (pattern) =>
+      text.includes(
+        pattern
+      )
+  );
+}
+
+/* =========================================================
+   AI RESPONSE PARSER
    ========================================================= */
 
 function parseAIResponse(
@@ -1727,7 +1236,6 @@ function parseAIResponse(
   confidence: number;
   checkId: string;
 }> {
-
   const results: Array<{
     category: string;
     title: string;
@@ -1746,6 +1254,19 @@ function parseAIResponse(
       )
       .trim();
 
+  /*
+   * Format:
+   *
+   * **Housekeeping**
+   *
+   * * **Title:** ...
+   * * **Observation:** ...
+   * * **Status:** PASS
+   * * **Risk:** LOW
+   * * **Confidence:** 0.9
+   * * **Check ID:** house-001
+   */
+
   const headingRegex =
     /(?:^|\n)\s*\*\*([^*\n]+)\*\*\s*(?=\n)/g;
 
@@ -1763,7 +1284,6 @@ function parseAIResponse(
         text
       )) !== null
   ) {
-
     const category =
       cleanMarkdown(
         match[1]
@@ -1783,7 +1303,6 @@ function parseAIResponse(
         category
       )
     ) {
-
       headings.push({
         index:
           match.index,
@@ -1798,7 +1317,6 @@ function parseAIResponse(
     i < headings.length;
     i++
   ) {
-
     const start =
       headings[i].index;
 
@@ -1818,7 +1336,8 @@ function parseAIResponse(
 
     const category =
       normalizeCategory(
-        headings[i].category
+        headings[i]
+          .category
       );
 
     const titleMatch =
@@ -1936,7 +1455,7 @@ function parseAIResponse(
 }
 
 /* =========================================================
-   LEGACY AI FORMAT
+   LEGACY PARSER
    ========================================================= */
 
 function parseLegacyAIResponse(
@@ -1950,7 +1469,6 @@ function parseLegacyAIResponse(
   confidence: number;
   checkId: string;
 }> {
-
   const results: Array<{
     category: string;
     title: string;
@@ -1969,7 +1487,6 @@ function parseLegacyAIResponse(
   for (
     const block of blocks
   ) {
-
     if (
       !block.trim()
     ) {
@@ -2095,134 +1612,230 @@ function parseLegacyAIResponse(
 }
 
 /* =========================================================
-   CHECK MATCHING
+   VECTORIZE EMBEDDING
    ========================================================= */
 
-function findCheck(
+async function createEmbedding(
+  env: Env,
+  text: string
+): Promise<number[]> {
+  const cleanText =
+    clean(
+      text,
+      2000
+    );
+
+  if (
+    !cleanText
+  ) {
+    throw new Error(
+      "Cannot create embedding from empty text."
+    );
+  }
+
+  let response: any;
+
+  try {
+    response =
+      await env.AI.run(
+        EMBEDDING_MODEL,
+        {
+          text: [
+            cleanText,
+          ],
+        } as any
+      );
+  } catch (error) {
+    throw new Error(
+      `Embedding generation failed: ${
+        error instanceof Error
+          ? error.message
+          : String(error)
+      }`
+    );
+  }
+
+  const vector =
+    response?.data?.[0] ||
+    response?.data ||
+    response?.embedding ||
+    response?.vector;
+
+  if (
+    !Array.isArray(vector)
+  ) {
+    throw new Error(
+      `Embedding model returned an invalid vector: ${JSON.stringify(
+        response
+      ).substring(
+        0,
+        1000
+      )}`
+    );
+  }
+
+  const numbers =
+    vector.map(
+      (value: unknown) =>
+        Number(value)
+    );
+
+  if (
+    numbers.length !==
+    768
+  ) {
+    throw new Error(
+      `Embedding dimension mismatch. Expected 768, received ${numbers.length}.`
+    );
+  }
+
+  return numbers;
+}
+
+/* =========================================================
+   VECTORIZE MATCH
+   ========================================================= */
+
+async function vectorSearchCheck(
+  env: Env,
   finding: {
     category: string;
     title: string;
     observation: string;
-    checkId: string;
-  },
-  checks: SafetyCheck[]
-): SafetyCheck | null {
+  }
+): Promise<{
+  check: SafetyCheck | null;
+  score: number | null;
+}> {
+  const searchText =
+    `
+Category: ${finding.category}
+Title: ${finding.title}
+Observation: ${finding.observation}
+`.trim();
 
-  if (
-    finding.checkId
-  ) {
+  const vector =
+    await createEmbedding(
+      env,
+      searchText
+    );
 
-    const exact =
-      checks.find(
-        (check) =>
-          check.id ===
-          finding.checkId
+  let result: any;
+
+  try {
+    result =
+      await env.VECTORIZE.query(
+        vector,
+        {
+          topK: 3,
+
+          returnMetadata:
+            "none",
+        } as any
       );
-
-    if (exact) {
-      return exact;
-    }
+  } catch (error) {
+    throw new Error(
+      `Vectorize query failed: ${
+        error instanceof Error
+          ? error.message
+          : String(error)
+      }`
+    );
   }
 
-  const category =
-    normalizeCategory(
-      finding.category
-    );
+  const matches =
+    result?.matches ||
+    [];
 
-  const categoryMatches =
-    checks.filter(
-      (check) =>
-        normalizeCategory(
-          check.category
-        ).toLowerCase() ===
-        category.toLowerCase()
+  if (
+    !Array.isArray(matches) ||
+    matches.length ===
+      0
+  ) {
+    return {
+      check: null,
+      score: null,
+    };
+  }
+
+  const best =
+    matches[0];
+
+  const score =
+    Number(
+      best?.score
     );
 
   if (
-    categoryMatches.length ===
-    1
+    !best?.id ||
+    !Number.isFinite(
+      score
+    )
   ) {
-    return categoryMatches[0];
+    return {
+      check: null,
+      score: null,
+    };
   }
 
-  const combined =
-    `${category} ${finding.title} ${finding.observation}`
-      .toLowerCase();
-
-  let best:
-    SafetyCheck | null =
-      null;
-
-  let bestScore = 0;
-
-  const candidates =
-    categoryMatches.length
-      ? categoryMatches
-      : checks;
-
-  for (
-    const check of
-      candidates
+  if (
+    score <
+    VECTOR_MATCH_THRESHOLD
   ) {
-
-    const keywordText =
-      clean(
-        check.keywords,
-        500
-      ).toLowerCase();
-
-    const keywords =
-      keywordText
-        .split(
-          /[,;|]+/
-        )
-        .map(
-          (word) =>
-            word.trim()
-        )
-        .filter(
-          (word) =>
-            word.length >= 3
-        );
-
-    let score = 0;
-
-    for (
-      const keyword of
-        keywords
-    ) {
-
-      if (
-        combined.includes(
-          keyword
-        )
-      ) {
-        score++;
-      }
-    }
-
-    if (
-      score >
-      bestScore
-    ) {
-      bestScore =
-        score;
-
-      best =
-        check;
-    }
+    return {
+      check: null,
+      score,
+    };
   }
 
-  return bestScore > 0
-    ? best
-    : null;
+  /*
+   * Vectorize stores the safety-check ID.
+   * Retrieve the authoritative record from D1.
+   */
+
+  const check =
+    await env.SAFETY_DB
+      .prepare(
+        `
+        SELECT
+          id,
+          category,
+          check_question,
+          guidance,
+          source_title,
+          source_url,
+          keywords
+        FROM safety_checks
+        WHERE id = ?
+        LIMIT 1
+        `
+      )
+      .bind(
+        String(
+          best.id
+        )
+      )
+      .first<SafetyCheck>();
+
+  if (!check) {
+    return {
+      check: null,
+      score,
+    };
+  }
+
+  return {
+    check,
+    score,
+  };
 }
 
 /* =========================================================
-   NORMALIZE FINDINGS
+   NORMALIZE FINDINGS + VECTOR MATCH
    ========================================================= */
 
-function normalizeFindings(
+async function normalizeFindings(
+  env: Env,
   parsed: Array<{
     category: string;
     title: string;
@@ -2231,10 +1844,8 @@ function normalizeFindings(
     risk: Risk;
     confidence: number;
     checkId: string;
-  }>,
-  checks: SafetyCheck[]
-): Finding[] {
-
+  }>
+): Promise<Finding[]> {
   const output:
     Finding[] = [];
 
@@ -2244,7 +1855,6 @@ function normalizeFindings(
   for (
     const item of parsed
   ) {
-
     const category =
       normalizeCategory(
         item.category
@@ -2295,17 +1905,71 @@ function normalizeFindings(
 
     seen.add(key);
 
-    const check =
-      findCheck(
-        {
-          category,
-          title,
-          observation,
-          checkId:
-            item.checkId,
-        },
-        checks
-      );
+    /*
+     * First try exact AI-provided check ID.
+     */
+
+    let check:
+      SafetyCheck | null =
+      null;
+
+    let vectorScore:
+      number | null =
+      null;
+
+    if (
+      item.checkId
+    ) {
+      check =
+        await env.SAFETY_DB
+          .prepare(
+            `
+            SELECT
+              id,
+              category,
+              check_question,
+              guidance,
+              source_title,
+              source_url,
+              keywords
+            FROM safety_checks
+            WHERE id = ?
+            LIMIT 1
+            `
+          )
+          .bind(
+            item.checkId
+          )
+          .first<SafetyCheck>();
+    }
+
+    /*
+     * If the AI didn't provide a valid check,
+     * use Vectorize.
+     *
+     * We also intentionally use Vectorize for
+     * weak/incorrect category matching.
+     */
+
+    if (
+      !check
+    ) {
+      const vectorMatch =
+        await vectorSearchCheck(
+          env,
+          {
+            category,
+            title,
+            observation,
+          }
+        );
+
+      check =
+        vectorMatch.check;
+
+      vectorScore =
+        vectorMatch.score;
+    }
 
     let confidence =
       Number(
@@ -2317,7 +1981,8 @@ function normalizeFindings(
         confidence
       )
     ) {
-      confidence = 0.6;
+      confidence =
+        0.6;
     }
 
     confidence =
@@ -2331,8 +1996,11 @@ function normalizeFindings(
 
     output.push({
       category,
+
       title,
+
       observation,
+
       status:
         item.status,
 
@@ -2341,7 +2009,8 @@ function normalizeFindings(
 
       confidence:
         Math.round(
-          confidence * 100
+          confidence *
+            100
         ) / 100,
 
       check_id:
@@ -2355,6 +2024,9 @@ function normalizeFindings(
       source_url:
         check?.source_url ||
         null,
+
+      vector_score:
+        vectorScore,
     });
 
     if (
@@ -2378,7 +2050,6 @@ function overall(
   | "PASS"
   | "ATTENTION"
   | "CHECK_REQUIRED" {
-
   if (
     findings.length ===
     0
@@ -2412,7 +2083,6 @@ function overall(
 function buildSummary(
   findings: Finding[]
 ): string {
-
   if (
     findings.length ===
     0
@@ -2468,7 +2138,6 @@ async function insertInspection(
   inspector: string,
   createdAt: string
 ): Promise<void> {
-
   const columns =
     await getTableColumns(
       env.SAFETY_DB,
@@ -2479,17 +2148,18 @@ async function insertInspection(
     string,
     unknown
   > = {
-
     id,
 
     inspection_no:
       inspectionNo,
 
     location:
-      location || null,
+      location ||
+      null,
 
     inspector:
-      inspector || null,
+      inspector ||
+      null,
 
     created_at:
       createdAt,
@@ -2528,7 +2198,6 @@ async function insertPhoto(
   contentType: string,
   createdAt: string
 ): Promise<void> {
-
   const columns =
     await getTableColumns(
       env.SAFETY_DB,
@@ -2549,8 +2218,8 @@ async function insertPhoto(
     string,
     unknown
   > = {
-
-    id: photoId,
+    id:
+      photoId,
 
     inspection_id:
       inspectionId,
@@ -2595,7 +2264,6 @@ async function insertInspectionItems(
   photoId: string,
   findings: Finding[]
 ): Promise<void> {
-
   if (
     findings.length ===
     0
@@ -2614,13 +2282,10 @@ async function insertInspectionItems(
       (
         finding
       ) => {
-
-        const values:
-          Record<
-            string,
-            unknown
-          > = {
-
+        const values: Record<
+          string,
+          unknown
+        > = {
           id:
             uuid(),
 
@@ -2695,7 +2360,6 @@ async function updateInspection(
     | "ATTENTION"
     | "CHECK_REQUIRED"
 ): Promise<void> {
-
   const columns =
     await getTableColumns(
       env.SAFETY_DB,
@@ -2739,13 +2403,11 @@ async function uploadToR2(
     inspectionNo: string;
   }
 ): Promise<void> {
-
   try {
-
     /*
      * EXISTING R2 FLOW
      *
-     * DO NOT CHANGE THE OBJECT KEY STRUCTURE.
+     * Do not change the object-key structure.
      */
 
     await env.PHOTOS.put(
@@ -2772,9 +2434,7 @@ async function uploadToR2(
         },
       }
     );
-
   } catch (error) {
-
     throw new Error(
       `R2 upload failed: ${
         error instanceof Error
@@ -2793,7 +2453,6 @@ async function analyze(
   request: Request,
   env: Env
 ): Promise<Response> {
-
   let stage =
     "starting";
 
@@ -2810,7 +2469,6 @@ async function analyze(
     false;
 
   try {
-
     stage =
       "parse image";
 
@@ -2837,6 +2495,11 @@ async function analyze(
     const createdAt =
       nowISO();
 
+    /*
+     * R2 OBJECT KEY REMAINS EXACTLY
+     * AS BEFORE.
+     */
+
     stage =
       "generate R2 object key";
 
@@ -2860,18 +2523,15 @@ async function analyze(
     stage =
       "R2 upload";
 
-    /*
-     * R2 remains before AI exactly as
-     * your current working flow.
-     */
-
     await uploadToR2(
       env,
       objectKey,
       photo,
       {
         inspectionId,
+
         photoId,
+
         inspectionNo,
       }
     );
@@ -2881,11 +2541,6 @@ async function analyze(
 
     stage =
       "D1 save inspection photo";
-
-    /*
-     * objectKey is guaranteed to exist
-     * before this insert.
-     */
 
     await insertPhoto(
       env,
@@ -2900,100 +2555,29 @@ async function analyze(
     stage =
       "D1 load safety checks";
 
-    const allChecks =
+    const checks =
       await loadSafetyChecks(
         env
       );
 
     if (
-      !allChecks.length
+      checks.length ===
+      0
     ) {
       throw new Error(
-        "No active safety checks are configured."
+        "No active safety checks are configured in D1."
       );
     }
 
-    /*
-     * =====================================================
-     * FIRST AI PASS
-     *
-     * Create a short visible-scene description.
-     * This is used only for Vectorize retrieval.
-     * =====================================================
-     */
-
     stage =
-      "AI visual scene description";
-
-    const sceneDescription =
-      await describeScene(
-        env,
-        photo.bytes,
-        photo.contentType
-      );
-
-    /*
-     * =====================================================
-     * VECTORIZE SEARCH
-     * =====================================================
-     */
-
-    stage =
-      "Vectorize semantic search";
-
-    let relevantChecks:
-      SafetyCheck[] = [];
-
-    try {
-
-      relevantChecks =
-        await searchVectorize(
-          env,
-          sceneDescription
-        );
-
-    } catch (vectorError) {
-
-      /*
-       * Vectorize should improve the analysis,
-       * but a Vectorize failure should not break
-       * an otherwise working inspection.
-       *
-       * Fall back to all D1 safety checks.
-       */
-
-      console.error(
-        "Vectorize search failed:",
-        vectorError
-      );
-
-      relevantChecks =
-        allChecks;
-    }
-
-    if (
-      !relevantChecks.length
-    ) {
-      relevantChecks =
-        allChecks;
-    }
-
-    /*
-     * =====================================================
-     * FINAL AI SAFETY ANALYSIS
-     * =====================================================
-     */
-
-    stage =
-      "Workers AI safety analysis";
+      "Workers AI Vision";
 
     const ai =
       await runAI(
         env,
         photo.bytes,
         photo.contentType,
-        relevantChecks,
-        sceneDescription
+        checks
       );
 
     stage =
@@ -3005,19 +2589,12 @@ async function analyze(
       );
 
     stage =
-      "match WSH checks";
-
-    /*
-     * Match against ALL D1 checks.
-     *
-     * Vectorize determines what checks are relevant,
-     * while D1 remains the authoritative source.
-     */
+      "Vectorize semantic matching";
 
     const findings =
-      normalizeFindings(
-        parsed,
-        allChecks
+      await normalizeFindings(
+        env,
+        parsed
       );
 
     stage =
@@ -3048,7 +2625,8 @@ async function analyze(
     );
 
     return jsonResponse({
-      ok: true,
+      ok:
+        true,
 
       inspection: {
         id:
@@ -3088,17 +2666,8 @@ async function analyze(
         model:
           MODEL,
 
-        scene_description:
-          sceneDescription,
-
-        vectorize:
-          true,
-
-        relevant_checks:
-          relevantChecks.map(
-            (check) =>
-              check.id
-          ),
+        embedding_model:
+          EMBEDDING_MODEL,
 
         response_length:
           ai.raw.length,
@@ -3123,50 +2692,52 @@ async function analyze(
 
         pass:
           findings.filter(
-            (f) =>
+            (
+              f
+            ) =>
               f.status ===
               "PASS"
           ).length,
 
         fail:
           findings.filter(
-            (f) =>
+            (
+              f
+            ) =>
               f.status ===
               "FAIL"
           ).length,
 
         check_required:
           findings.filter(
-            (f) =>
+            (
+              f
+            ) =>
               f.status ===
               "CHECK_REQUIRED"
           ).length,
       },
     });
-
   } catch (error) {
-
     const detail =
       error instanceof Error
         ? error.message
         : String(error);
 
     /*
-     * Clean up the R2 object if the analysis
-     * fails after upload.
+     * Remove R2 object if analysis failed.
+     *
+     * This retains the existing cleanup behaviour.
      */
 
     if (
       r2Uploaded &&
       objectKey
     ) {
-
       try {
-
         await env.PHOTOS.delete(
           objectKey
         );
-
       } catch {
         // Ignore cleanup failure.
       }
@@ -3175,15 +2746,12 @@ async function analyze(
     if (
       inspectionId
     ) {
-
       try {
-
         await updateInspection(
           env,
           inspectionId,
           "CHECK_REQUIRED"
         );
-
       } catch {
         // Ignore secondary failure.
       }
@@ -3209,12 +2777,15 @@ async function analyze(
           ? `R2 object: ${objectKey}`
           : "",
       ]
-        .filter(Boolean)
+        .filter(
+          Boolean
+        )
         .join("\n");
 
     return jsonResponse(
       {
-        ok: false,
+        ok:
+          false,
 
         error:
           diagnostic,
@@ -3248,9 +2819,7 @@ async function getInspection(
   env: Env,
   id: string
 ): Promise<Response> {
-
   try {
-
     const inspection =
       await env.SAFETY_DB
         .prepare(
@@ -3267,10 +2836,10 @@ async function getInspection(
     if (
       !inspection
     ) {
-
       return jsonResponse(
         {
-          ok: false,
+          ok:
+            false,
 
           error:
             "Inspection not found.",
@@ -3311,7 +2880,8 @@ async function getInspection(
         .all();
 
     return jsonResponse({
-      ok: true,
+      ok:
+        true,
 
       inspection,
 
@@ -3323,12 +2893,11 @@ async function getInspection(
         items.results ||
         [],
     });
-
   } catch (error) {
-
     return jsonResponse(
       {
-        ok: false,
+        ok:
+          false,
 
         error:
           error instanceof Error
@@ -3347,9 +2916,7 @@ async function getInspection(
 async function recentInspections(
   env: Env
 ): Promise<Response> {
-
   try {
-
     const result =
       await env.SAFETY_DB
         .prepare(
@@ -3363,18 +2930,18 @@ async function recentInspections(
         .all();
 
     return jsonResponse({
-      ok: true,
+      ok:
+        true,
 
       inspections:
         result.results ||
         [],
     });
-
   } catch (error) {
-
     return jsonResponse(
       {
-        ok: false,
+        ok:
+          false,
 
         error:
           error instanceof Error
@@ -3393,7 +2960,6 @@ async function recentInspections(
 async function health(
   env: Env
 ): Promise<Response> {
-
   let database =
     false;
 
@@ -3407,7 +2973,6 @@ async function health(
     false;
 
   try {
-
     await env.SAFETY_DB
       .prepare(
         "SELECT 1 AS ok"
@@ -3416,46 +2981,35 @@ async function health(
 
     database =
       true;
-
   } catch {
-
     database =
       false;
   }
 
   try {
-
     await loadSafetyChecks(
       env
     );
 
     safetyChecks =
       true;
-
   } catch {
-
     safetyChecks =
       false;
   }
 
   try {
-
     r2 =
       !!env.PHOTOS;
-
   } catch {
-
     r2 =
       false;
   }
 
   try {
-
     vectorize =
       !!env.VECTORIZE;
-
   } catch {
-
     vectorize =
       false;
   }
@@ -3485,6 +3039,15 @@ async function health(
 
     vectorize,
 
+    vectorize_index:
+      VECTORIZE_INDEX,
+
+    vectorize_dimensions:
+      768,
+
+    vector_match_threshold:
+      VECTOR_MATCH_THRESHOLD,
+
     timestamp:
       nowISO(),
   });
@@ -3497,28 +3060,26 @@ async function health(
 async function safetyChecks(
   env: Env
 ): Promise<Response> {
-
   try {
-
     const checks =
       await loadSafetyChecks(
         env
       );
 
     return jsonResponse({
-      ok: true,
+      ok:
+        true,
 
       count:
         checks.length,
 
       checks,
     });
-
   } catch (error) {
-
     return jsonResponse(
       {
-        ok: false,
+        ok:
+          false,
 
         error:
           error instanceof Error
@@ -3538,16 +3099,13 @@ async function getPhoto(
   env: Env,
   objectKey: string
 ): Promise<Response> {
-
   try {
-
     const object =
       await env.PHOTOS.get(
         objectKey
       );
 
     if (!object) {
-
       return textResponse(
         "Photo not found.",
         404
@@ -3574,17 +3132,227 @@ async function getPhoto(
     return new Response(
       object.body,
       {
-        status: 200,
+        status:
+          200,
+
         headers,
       }
     );
-
   } catch (error) {
-
     return textResponse(
       error instanceof Error
         ? error.message
         : String(error),
+      500
+    );
+  }
+}
+
+/* =========================================================
+   VECTORIZE SEED
+   ========================================================= */
+
+function validateSeedKey(
+  request: Request,
+  env: Env
+): boolean {
+  const provided =
+    request.headers.get(
+      "X-Vectorize-Seed-Key"
+    );
+
+  if (
+    !provided ||
+    !env.VECTORIZE_SEED_KEY
+  ) {
+    return false;
+  }
+
+  return (
+    provided ===
+    env.VECTORIZE_SEED_KEY
+  );
+}
+
+async function seedVectorize(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  if (
+    !validateSeedKey(
+      request,
+      env
+    )
+  ) {
+    return jsonResponse(
+      {
+        ok:
+          false,
+
+        error:
+          "Invalid or missing Vectorize seed key.",
+      },
+      401
+    );
+  }
+
+  try {
+    const checks =
+      await loadSafetyChecks(
+        env
+      );
+
+    if (
+      checks.length ===
+      0
+    ) {
+      return jsonResponse(
+        {
+          ok:
+            false,
+
+          error:
+            "No safety checks found in D1.",
+        },
+        400
+      );
+    }
+
+    const vectors: Array<{
+      id: string;
+      values: number[];
+      metadata: Record<
+        string,
+        string
+      >;
+    }> = [];
+
+    for (
+      const check of checks
+    ) {
+      const text =
+        `
+Category: ${check.category}
+Safety Check: ${check.check_question}
+Guidance: ${check.guidance}
+Keywords: ${check.keywords}
+Source: ${check.source_title}
+`.trim();
+
+      const values =
+        await createEmbedding(
+          env,
+          text
+        );
+
+      vectors.push({
+        id:
+          check.id,
+
+        values,
+
+        metadata: {
+          category:
+            clean(
+              check.category,
+              200
+            ),
+
+          check_question:
+            clean(
+              check.check_question,
+              500
+            ),
+
+          guidance:
+            clean(
+              check.guidance,
+              1000
+            ),
+
+          source_title:
+            clean(
+              check.source_title,
+              300
+            ),
+
+          source_url:
+            clean(
+              check.source_url,
+              500
+            ),
+        },
+      });
+    }
+
+    /*
+     * Vectorize supports batch insertion.
+     *
+     * Keep batches reasonably small.
+     */
+
+    const batchSize =
+      20;
+
+    let indexed =
+      0;
+
+    for (
+      let i = 0;
+      i < vectors.length;
+      i += batchSize
+    ) {
+      const batch =
+        vectors.slice(
+          i,
+          i + batchSize
+        );
+
+      await env.VECTORIZE.insert(
+        batch
+      );
+
+      indexed +=
+        batch.length;
+    }
+
+    return jsonResponse({
+      ok:
+        true,
+
+      message:
+        "Safety checks successfully indexed into Vectorize.",
+
+      index:
+        VECTORIZE_INDEX,
+
+      embedding_model:
+        EMBEDDING_MODEL,
+
+      dimensions:
+        768,
+
+      indexed,
+
+      ids:
+        checks.map(
+          (
+            check
+          ) =>
+            check.id
+        ),
+    });
+  } catch (error) {
+    return jsonResponse(
+      {
+        ok:
+          false,
+
+        error:
+          error instanceof Error
+            ? error.message
+            : String(error),
+      },
       500
     );
   }
@@ -3599,30 +3367,27 @@ async function api(
   env: Env,
   url: URL
 ): Promise<Response> {
-
   const path =
     url.pathname;
 
-  /* -------------------------------------------------------
-     HEALTH
-     ------------------------------------------------------- */
+  /* HEALTH */
 
   if (
-    request.method === "GET" &&
-    path === "/api/health"
+    request.method ===
+      "GET" &&
+    path ===
+      "/api/health"
   ) {
-
     return health(
       env
     );
   }
 
-  /* -------------------------------------------------------
-     ANALYZE
-     ------------------------------------------------------- */
+  /* ANALYZE */
 
   if (
-    request.method === "POST" &&
+    request.method ===
+      "POST" &&
     (
       path ===
         "/api/analyze" ||
@@ -3630,39 +3395,34 @@ async function api(
         "/api/analysis"
     )
   ) {
-
     return analyze(
       request,
       env
     );
   }
 
-  /* -------------------------------------------------------
-     RECENT INSPECTIONS
-     ------------------------------------------------------- */
+  /* RECENT INSPECTIONS */
 
   if (
-    request.method === "GET" &&
+    request.method ===
+      "GET" &&
     path ===
       "/api/inspections"
   ) {
-
     return recentInspections(
       env
     );
   }
 
-  /* -------------------------------------------------------
-     INSPECTION DETAIL
-     ------------------------------------------------------- */
+  /* SINGLE INSPECTION */
 
   if (
-    request.method === "GET" &&
+    request.method ===
+      "GET" &&
     path.startsWith(
       "/api/inspection/"
     )
   ) {
-
     const id =
       decodeURIComponent(
         path.substring(
@@ -3672,10 +3432,10 @@ async function api(
       );
 
     if (!id) {
-
       return jsonResponse(
         {
-          ok: false,
+          ok:
+            false,
 
           error:
             "Missing inspection ID.",
@@ -3690,38 +3450,33 @@ async function api(
     );
   }
 
-  /* -------------------------------------------------------
-     SAFETY CHECKS
-     ------------------------------------------------------- */
+  /* SAFETY CHECKS */
 
   if (
-    request.method === "GET" &&
+    request.method ===
+      "GET" &&
     path ===
       "/api/safety-checks"
   ) {
-
     return safetyChecks(
       env
     );
   }
 
-  /* -------------------------------------------------------
-     PHOTO
-     ------------------------------------------------------- */
+  /* PHOTO */
 
   if (
-    request.method === "GET" &&
+    request.method ===
+      "GET" &&
     path ===
       "/api/photo"
   ) {
-
     const key =
       url.searchParams.get(
         "key"
       );
 
     if (!key) {
-
       return textResponse(
         "Missing photo key.",
         400
@@ -3734,29 +3489,24 @@ async function api(
     );
   }
 
-  /* -------------------------------------------------------
-     VECTORIZE SEED
-     ------------------------------------------------------- */
+  /* VECTORIZE SEED */
 
   if (
-    request.method === "POST" &&
+    request.method ===
+      "POST" &&
     path ===
       "/api/vectorize/seed"
   ) {
-
     return seedVectorize(
       request,
       env
     );
   }
 
-  /* -------------------------------------------------------
-     UNKNOWN API
-     ------------------------------------------------------- */
-
   return jsonResponse(
     {
-      ok: false,
+      ok:
+        false,
 
       error:
         "API endpoint not found.",
@@ -3772,23 +3522,20 @@ async function api(
    ========================================================= */
 
 export default {
-
   async fetch(
     request: Request,
     env: Env
   ): Promise<Response> {
-
     try {
-
       if (
         request.method ===
         "OPTIONS"
       ) {
-
         return new Response(
           null,
           {
-            status: 204,
+            status:
+              204,
 
             headers: {
               "Access-Control-Allow-Origin":
@@ -3814,7 +3561,6 @@ export default {
           "/api/"
         )
       ) {
-
         return api(
           request,
           env,
@@ -3822,8 +3568,11 @@ export default {
         );
       }
 
-      try {
+      /*
+       * Serve public assets.
+       */
 
+      try {
         const asset =
           await env.ASSETS.fetch(
             request
@@ -3833,10 +3582,8 @@ export default {
           asset.status !==
           404
         ) {
-
           return asset;
         }
-
       } catch {
         // Continue.
       }
@@ -3844,7 +3591,8 @@ export default {
       return new Response(
         "Depot Safety AI is running.",
         {
-          status: 200,
+          status:
+            200,
 
           headers: {
             "Content-Type":
@@ -3852,12 +3600,11 @@ export default {
           },
         }
       );
-
     } catch (error) {
-
       return jsonResponse(
         {
-          ok: false,
+          ok:
+            false,
 
           error:
             error instanceof Error
