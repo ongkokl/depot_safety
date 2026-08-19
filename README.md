@@ -1,163 +1,117 @@
-# Safety Inspection AI — Cloudflare MVP
+# SIR – Safety Inspection Report
 
-A Cloudflare-native safety inspection web app for Singapore workplace inspections.
+Cloudflare Worker application for `https://sir.ondockdepot.workers.dev`.
 
-## What this MVP does
+## Stack
 
-1. Inspector uploads/takes a workplace photo.
-2. Photo is stored in Cloudflare R2.
-3. Cloudflare Workers AI analyses visible safety situations.
-4. The AI identifies categories such as:
-   - Vehicular Safety
-   - Housekeeping
-   - PPE
-   - Work at Height
-   - Lifting
-5. Relevant WSH checks are retrieved from D1.
-6. Optional Vectorize semantic matching improves the check retrieval.
-7. Findings are saved in D1.
-8. The web UI shows PASS / FAIL / CHECK REQUIRED with WSH source links.
+- Cloudflare Workers
+- D1 for structured report data
+- R2 for private inspection photos
+- Cloudflare Email Service for notifications
+- Google OAuth 2.0 + PKCE for SSO
+- Browser-side PDF generation after successful submission
 
-## Important safety design
+Cloudflare currently recommends `wrangler.jsonc` for new Worker projects. D1/R2 are configured as Worker bindings. Email Sending uses a `send_email` binding and requires an onboarded sending domain and Workers Paid plan.
 
-The AI is an inspection assistant, not a legal/compliance authority. A photo can be insufficient to establish compliance. The UI therefore uses `CHECK_REQUIRED` when the evidence is uncertain.
+## Security model
 
-## Cloudflare resources
+- Google SSO is required.
+- Only users allow-listed in `users` can sign in.
+- Initial Super Admin email is configured by `BOOTSTRAP_SUPER_ADMIN_EMAIL`.
+- The authenticated Google `sub` is the permanent identity used for authorization.
+- A submitted inspection is immutable.
+- Only the original creator can edit a draft.
+- Corrective actions are editable only by the assigned user or Admin.
+- Closure requires Admin approval.
+- Audit records are append-only.
+- R2 is private; photos are served through authorized Worker routes.
+- Server-side authorization is enforced on every state-changing endpoint.
 
-- Workers: application/API
-- Workers AI: vision + embeddings
-- D1: inspection and WSH check database
-- R2: inspection photographs
-- Vectorize: semantic matching of photo observations to WSH checks
-
-Cloudflare documents the Workers AI vision model `@cf/meta/llama-3.2-11b-vision-instruct` and the 768-dimensional `@cf/baai/bge-base-en-v1.5` embedding model.
-
-## Setup
-
-### 1. Prerequisites
-
-Install Node.js and Wrangler.
+## 1. Create resources
 
 ```bash
 npm install
 npx wrangler login
+
+npx wrangler d1 create SIR_DB
+npx wrangler r2 bucket create sir-photos
 ```
 
-### 2. Create Cloudflare resources
+Copy the returned D1 `database_id` into `wrangler.jsonc`.
+
+## 2. Google OAuth
+
+Create a Google OAuth Web Application client.
+
+Authorized redirect URI:
+
+`https://sir.ondockdepot.workers.dev/auth/callback`
+
+Set these Worker secrets:
 
 ```bash
-npx wrangler d1 create safety-inspection-db
-npx wrangler r2 bucket create safety-inspection-photos
-npx wrangler vectorize create safety-wsh-index --dimensions=768 --metric=cosine
+npx wrangler secret put GOOGLE_CLIENT_SECRET
+npx wrangler secret put SESSION_SECRET
 ```
 
-Copy the D1 database ID into `wrangler.toml`.
+Set the client ID in `wrangler.jsonc` under `vars.GOOGLE_CLIENT_ID`.
 
-### 3. Accept the Meta license
+For production, use a long random SESSION_SECRET.
 
-The first call to the Llama 3.2 11B Vision model requires acceptance of Meta's license.
+## 3. Bootstrap the first Super Admin
 
-Use your Cloudflare dashboard/API token, or run the equivalent request described in Cloudflare's official Workers AI Llama Vision documentation.
+Set:
 
-### 4. Apply the D1 migrations
+```json
+"BOOTSTRAP_SUPER_ADMIN_EMAIL": "ongkokleong@gmail.com"
+```
 
-For local testing:
+The first successful Google sign-in using that email is provisioned as `super_admin`.
+
+Do not put a Google client secret or other credentials into GitHub.
+
+## 4. D1 migration
 
 ```bash
-npm run db:local
+npx wrangler d1 migrations apply SIR_DB --remote
 ```
 
-For production:
+## 5. R2
 
-```bash
-npm run db:remote
+The Worker expects an R2 bucket binding called `PHOTOS`.
+
+## 6. Email
+
+Cloudflare Email Service must be onboarded for your sending domain. Update:
+
+```json
+"EMAIL_FROM": "sir@your-onboarded-domain.com"
 ```
 
-### 5. Run locally
+Then use the `EMAIL` binding in `wrangler.jsonc`.
+
+The initial Admin notification recipient is:
+
+`ongkokl@globalpsa.com`
+
+## 7. Local development
 
 ```bash
 npm run dev
 ```
 
-Open the local URL shown by Wrangler.
+Google OAuth normally needs a publicly reachable callback for testing. Use a suitable development OAuth redirect URI if testing locally.
 
-### 6. Deploy
+## 8. Deploy
 
 ```bash
 npm run deploy
 ```
 
-## Vectorize knowledge-base indexing
+Then open:
 
-The MVP works with D1 category/keyword matching even if Vectorize is not populated.
+`https://sir.ondockdepot.workers.dev`
 
-For production, the next step is to ingest the full WSH Council documents into `safety_checks`, generate embeddings with:
+## Important
 
-`@cf/baai/bge-base-en-v1.5`
-
-and upsert the check IDs + vectors into `safety-wsh-index`.
-
-Recommended metadata per vector:
-
-- check_id
-- category
-- source_title
-- source_url
-- version
-- document_date
-
-## Initial WSH sources
-
-The seed migration includes references to WSH Council material on:
-
-- Vehicular Safety
-- Workplace Traffic Safety Management
-- Workplace Housekeeping
-- PPE
-- Work at Height
-- Lifting
-
-The official WSH Council website should remain the authoritative source. Expand the knowledge base with the latest applicable WSH Council guidelines/checklists before production use.
-
-## Production improvements
-
-Before production rollout, add:
-
-- Cloudflare Access authentication
-- role-based permissions
-- image retention policy
-- audit logging
-- corrective action workflow
-- due dates and reminders
-- dashboard/KPI
-- WSH document ingestion and versioning
-- human confirmation workflow
-- EXIF stripping/privacy controls
-- rate limiting
-- maximum image dimensions
-- AI Gateway
-- automated WSH source refresh
-- organisation/site configuration
-- export to PDF/Excel
-
-## Suggested depot-specific checks
-
-For a container depot, extend the knowledge base with:
-
-- prime mover / truck interaction
-- pedestrian segregation
-- reversing
-- banksman / traffic controller
-- chassis condition
-- container door movement
-- container stacking
-- twist-lock handling
-- reach stacker operation
-- forklift operation
-- oil spill
-- wet surfaces
-- housekeeping
-- PPE
-- work at height
-- lifting operations
-- damaged barriers and traffic controls
+This repository is a production-oriented starting point, but you should test Google OAuth, email delivery, photo uploads, authorization boundaries, backups and PDF rendering before using it for operational records.

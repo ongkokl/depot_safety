@@ -1,0 +1,45 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sir-ondockdepot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-19",
+
+  "vars": {
+    "APP_URL": "https://sir.ondockdepot.workers.dev",
+    "GOOGLE_CLIENT_ID": "REPLACE_WITH_GOOGLE_CLIENT_ID",
+    "BOOTSTRAP_SUPER_ADMIN_EMAIL": "ongkokleong@gmail.com",
+    "EMAIL_FROM": "sir@REPLACE_WITH_YOUR_ONBOARDED_DOMAIN",
+    "ADMIN_NOTIFICATION_EMAIL": "ongkokl@globalpsa.com"
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "SIR_DB",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID"
+    }
+  ],
+
+  "r2_buckets": [
+    {
+      "binding": "PHOTOS",
+      "bucket_name": "sir-photos"
+    }
+  ],
+
+  "send_email": [
+    {
+      "name": "EMAIL",
+      "remote": true,
+      "allowed_destination_addresses": [
+        "ongkokl@globalpsa.com"
+      ]
+    }
+  ],
+
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  }
+}
