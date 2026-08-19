@@ -1,2623 +1,290 @@
-/* Depot Safety AI Worker - Version 2.6
- *
- * Features:
- * - Cloudflare Workers AI vision analysis
- * - D1 inspections / findings
- * - R2 photo storage
- * - Vectorize semantic WSHC retrieval
- * - Protected Vectorize seed endpoint
- * - Detailed WSHC-derived checklist items
- * - Equipment/activity detection
- * - Visual vs physical verification checks
- *
- * Required bindings:
- * AI, SAFETY_DB, PHOTOS, VECTORIZE, ASSETS
- *
- * Required secret:
- * VECTORIZE_SEED_KEY
- */
-
-export interface Env {
-  AI: Ai;
-  SAFETY_DB: D1Database;
+interface Env {
+  DB: D1Database;
   PHOTOS: R2Bucket;
-  VECTORIZE: VectorizeIndex;
   ASSETS: Fetcher;
-  VECTORIZE_SEED_KEY?: string;
-}
-
-const MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
-const EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
-const VECTOR_DIMENSIONS = 768;
-const VECTOR_MATCH_THRESHOLD = 0.45;
-const MAX_IMAGE_SIZE = 12 * 1024 * 1024;
-const MAX_FINDINGS = 8;
-const MAX_CHECKLIST_ITEMS = 12;
-
-type Status = "PASS" | "FAIL" | "CHECK_REQUIRED";
-type Risk = "LOW" | "MEDIUM" | "HIGH";
-type SourceType = "WSHC_DIRECT" | "WSHC_DERIVED";
-type CheckType = "VISUAL" | "PHYSICAL" | "BOTH";
-
-interface SafetyCheck {
-  id: string;
-  category: string;
-  check_question: string;
-  guidance: string;
-  source_title: string;
-  source_url: string;
-  keywords: string;
-  active?: number;
-  source_type?: SourceType;
-}
-
-interface ChecklistItem {
-  id: string;
-  safety_check_id: string;
-  equipment_type: string;
-  check_item: string;
-  check_type: CheckType;
-  importance: Risk;
-  source_title: string;
-  source_url: string;
-  source_type: SourceType;
-  active?: number;
-}
-
-interface Finding {
-  category: string;
-  title: string;
-  observation: string;
-  status: Status;
-  risk_level: Risk;
-  confidence: number;
-  check_id: string | null;
-  source_title: string | null;
-  source_url: string | null;
-  source_type: SourceType | null;
-  equipment_type: string | null;
-  visual_checks: ChecklistItem[];
-  physical_checks: ChecklistItem[];
-}
-
-interface PhotoInput {
-  bytes: ArrayBuffer;
-  contentType: string;
-  fileName: string;
-}
-
-interface ParsedRequest {
-  photo: PhotoInput;
-  location: string;
-  inspector: string;
-}
-
-const ALLOWED_TABLES = [
-  "inspections",
-  "inspection_photos",
-  "inspection_items",
-  "safety_checks",
-  "safety_check_items",
-  "corrective_actions",
-];
-
-function jsonResponse(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, X-Vectorize-Seed-Key",
-    },
-  });
-}
-
-function textResponse(text: string, status = 200): Response {
-  return new Response(text, {
-    status,
-    headers: {
-      "Content-Type": "text/plain; charset=utf-8",
-      "Access-Control-Allow-Origin": "*",
-    },
-  });
-}
-
-function uuid(): string {
-  return crypto.randomUUID();
-}
-
-function nowISO(): string {
-  return new Date().toISOString();
-}
-
-function clean(value: unknown, max = 2000): string {
-  if (value === null || value === undefined) return "";
-  return String(value).replace(/\u0000/g, "").trim().substring(0, max);
-}
-
-function cleanMarkdown(value: unknown, max = 2000): string {
-  return clean(value, max)
-    .replace(/\*\*/g, "")
-    .replace(/__/g, "")
-    .replace(/^#+\s*/g, "")
-    .replace(/^[-*•]\s*/g, "")
-    .trim();
-}
-
-function inspectionNumber(): string {
-  const d = new Date();
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  const random = crypto.randomUUID().replace(/-/g, "").substring(0, 6).toUpperCase();
-  return `SI-${y}${m}${day}-${random}`;
-}
-
-function normalizeContentType(value: unknown): string {
-  const type = String(value || "").toLowerCase().split(";")[0].trim();
-  if (type === "image/png") return "image/png";
-  if (type === "image/webp") return "image/webp";
-  if (type === "image/gif") return "image/gif";
-  if (type === "image/heic") return "image/heic";
-  if (type === "image/heif") return "image/heif";
-  return "image/jpeg";
-}
-
-function extension(contentType: string): string {
-  switch (contentType) {
-    case "image/png": return "png";
-    case "image/webp": return "webp";
-    case "image/gif": return "gif";
-    case "image/heic": return "heic";
-    case "image/heif": return "heif";
-    default: return "jpg";
-  }
-}
-
-function safeFileName(value: string): string {
-  const result = value.replace(/[^a-zA-Z0-9._-]/g, "_").substring(0, 150);
-  return result || "inspection-photo.jpg";
-}
-
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
-    binary += String.fromCharCode(...chunk);
-  }
-  return btoa(binary);
-}
-
-function imageDataUrl(bytes: ArrayBuffer, contentType: string): string {
-  return `data:${contentType};base64,${arrayBufferToBase64(bytes)}`;
-}
-
-async function parseRequest(request: Request): Promise<ParsedRequest> {
-  const contentType = request.headers.get("content-type") || "";
-
-  if (contentType.toLowerCase().includes("multipart/form-data")) {
-    const form = await request.formData();
-    let file: File | null = null;
-
-    for (const name of ["image", "photo", "file", "photoFile"]) {
-      const value = form.get(name);
-      if (value instanceof File) {
-        file = value;
-        break;
-      }
-    }
-
-    if (!file) {
-      for (const [, value] of form.entries()) {
-        if (value instanceof File) {
-          file = value;
-          break;
-        }
-      }
-    }
-
-    if (!file) throw new Error("No image file was uploaded.");
-
-    const bytes = await file.arrayBuffer();
-    if (!bytes.byteLength) throw new Error("The uploaded image is empty.");
-    if (bytes.byteLength > MAX_IMAGE_SIZE) {
-      throw new Error("The uploaded image is larger than 12 MB.");
-    }
-
-    return {
-      photo: {
-        bytes,
-        contentType: normalizeContentType(file.type),
-        fileName: safeFileName(file.name || "inspection-photo.jpg"),
-      },
-      location: clean(form.get("location"), 200) || "Unspecified",
-      inspector: clean(form.get("inspector"), 200) || "Unspecified",
-    };
-  }
-
-  let body: any;
-  try {
-    body = await request.json();
-  } catch {
-    throw new Error("Request body is not valid JSON.");
-  }
-
-  let base64 = body?.image || body?.imageBase64 || body?.photo;
-  if (typeof base64 !== "string" || !base64.trim()) {
-    throw new Error("No image was supplied.");
-  }
-
-  base64 = base64.trim();
-  let imageType = normalizeContentType(body?.mimeType || body?.contentType || "image/jpeg");
-
-  const match = base64.match(/^data:(image\/[^;]+);base64,(.+)$/s);
-  if (match) {
-    imageType = normalizeContentType(match[1]);
-    base64 = match[2];
-  }
-
-  let binary: string;
-  try {
-    binary = atob(base64);
-  } catch {
-    throw new Error("Image data is not valid base64.");
-  }
-
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
-  if (!bytes.byteLength) throw new Error("The image is empty.");
-  if (bytes.byteLength > MAX_IMAGE_SIZE) {
-    throw new Error("The image is larger than 12 MB.");
-  }
-
-  return {
-    photo: {
-      bytes: bytes.buffer,
-      contentType: imageType,
-      fileName: safeFileName(body?.fileName || `inspection.${extension(imageType)}`),
-    },
-    location: clean(body?.location, 200) || "Unspecified",
-    inspector: clean(body?.inspector, 200) || "Unspecified",
-  };
-}
-
-async function getTableColumns(db: D1Database, table: string): Promise<Set<string>> {
-  if (!ALLOWED_TABLES.includes(table)) throw new Error(`Invalid table name: ${table}`);
-  const result = await db.prepare(`PRAGMA table_info("${table}")`).all<{ name: string }>();
-  return new Set((result.results || []).map(row => row.name));
-}
-
-function buildInsert(
-  table: string,
-  columns: Set<string>,
-  values: Record<string, unknown>
-): { sql: string; params: unknown[] } {
-  if (!ALLOWED_TABLES.includes(table)) throw new Error(`Invalid insert table: ${table}`);
-
-  const selected = Object.entries(values).filter(([column]) => columns.has(column));
-  if (!selected.length) throw new Error(`No matching columns found in ${table}.`);
-
-  return {
-    sql: `INSERT INTO "${table}" (${selected.map(([c]) => `"${c}"`).join(", ")}) VALUES (${selected.map(() => "?").join(", ")})`,
-    params: selected.map(([, value]) => value),
-  };
-}
-
-async function ensureChecklistTable(env: Env): Promise<void> {
-  await env.SAFETY_DB.prepare(`
-    CREATE TABLE IF NOT EXISTS safety_check_items (
-      id TEXT PRIMARY KEY,
-      safety_check_id TEXT NOT NULL,
-      equipment_type TEXT NOT NULL DEFAULT 'GENERAL',
-      check_item TEXT NOT NULL,
-      check_type TEXT NOT NULL DEFAULT 'PHYSICAL',
-      importance TEXT NOT NULL DEFAULT 'MEDIUM',
-      source_title TEXT NOT NULL,
-      source_url TEXT NOT NULL,
-      source_type TEXT NOT NULL DEFAULT 'WSHC_DERIVED',
-      active INTEGER NOT NULL DEFAULT 1,
-      FOREIGN KEY (safety_check_id) REFERENCES safety_checks(id) ON DELETE CASCADE
-    )
-  `).run();
-
-  await env.SAFETY_DB.prepare(`
-    CREATE INDEX IF NOT EXISTS idx_safety_check_items_check
-    ON safety_check_items(safety_check_id)
-  `).run();
-
-  await env.SAFETY_DB.prepare(`
-    CREATE INDEX IF NOT EXISTS idx_safety_check_items_equipment
-    ON safety_check_items(equipment_type)
-  `).run();
-}
-
-async function loadSafetyChecks(env: Env): Promise<SafetyCheck[]> {
-  const columns = await getTableColumns(env.SAFETY_DB, "safety_checks");
-  const required = ["id", "category", "check_question", "guidance", "source_title", "source_url", "keywords"];
-  const missing = required.filter(column => !columns.has(column));
-  if (missing.length) throw new Error(`safety_checks is missing columns: ${missing.join(", ")}`);
-
-  const sourceTypeSelect = columns.has("source_type") ? ", source_type" : "";
-  const result = await env.SAFETY_DB.prepare(`
-    SELECT id, category, check_question, guidance, source_title, source_url, keywords${sourceTypeSelect}
-    FROM safety_checks
-    WHERE active = 1
-    ORDER BY category, id
-    LIMIT 80
-  `).all<SafetyCheck>();
-
-  return result.results || [];
-}
-
-function buildPrompt(checks: SafetyCheck[]): string {
-  const available = checks.map(check => `
-CHECK ID: ${check.id}
-CATEGORY: ${check.category}
-QUESTION: ${clean(check.check_question, 350)}
-GUIDANCE: ${clean(check.guidance, 500)}
-KEYWORDS: ${clean(check.keywords, 250)}
-`).join("\n");
-
-  return `
-You are a careful workplace safety visual inspection assistant for a Singapore shipping/container depot and container repair yard.
-
-Analyse ONLY the photograph and report safety-relevant conditions that are visibly supported by the image.
-
-IMPORTANT SAFETY RULES:
-1. A category that is not visible or not relevant MUST be omitted.
-2. Never create a PASS finding merely because something is not visible.
-3. Never report statements such as "no visible electrical equipment", "no visible forklift", "no visible chemicals", or similar negative-visibility observations.
-4. A generic object, person, container, road, concrete surface or background vehicle is NOT automatically a safety finding.
-5. Report an object only when it is itself safety-relevant or there is a visible safety condition/activity associated with it.
-6. If a photograph does not provide enough evidence to confirm that a relevant item is safe, use CHECK_REQUIRED.
-7. PASS means there is positive visible evidence supporting the pass.
-8. FAIL means a visible unsafe condition is present.
-9. CHECK_REQUIRED means a relevant safety condition/equipment/activity is visible but physical condition or safe operation cannot be fully confirmed from the photograph.
-10. Do not invent details that cannot be seen.
-11. A single visible object may legitimately belong to more than one safety category. For example, an elevated frame marked SWL 2500 KG may be relevant to both Work at Height and Lifting.
-12. Identify the most specific equipment/activity when it is visibly supported.
-13. Do NOT determine WSHC check IDs, source URLs, or WSHC source types. Those are resolved by the Worker using D1 and Vectorize after the visual analysis.
-
-EQUIPMENT TYPES WHEN CLEARLY SUPPORTED:
-LADDER, MOBILE_ACCESS_PLATFORM, SCAFFOLD, FORKLIFT, REACH_STACKER, LIFTING_GEAR, CONTAINER_REPAIR, WELDING, GRINDING, ELECTRICAL_TOOL, CHEMICAL, VEHICLE, GENERAL.
-
-CONFIDENCE must be between 0 and 1.
-
-Return ONLY the JSON object required by the response schema. Do not return Markdown, explanations, headings, or a scene description.
-
-AVAILABLE WSH CHECK CATEGORIES:
-${available}
-`.trim();
-}
-
-const AI_FINDINGS_JSON_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    findings: {
-      type: "array",
-      maxItems: MAX_FINDINGS,
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          category: {
-            type: "string",
-            description: "The relevant safety category supported by visible evidence."
-          },
-          title: {
-            type: "string",
-            description: "Short safety finding title."
-          },
-          observation: {
-            type: "string",
-            description: "Only visible evidence from the photograph."
-          },
-          status: {
-            type: "string",
-            enum: ["PASS", "FAIL", "CHECK_REQUIRED"]
-          },
-          risk: {
-            type: "string",
-            enum: ["LOW", "MEDIUM", "HIGH"]
-          },
-          confidence: {
-            type: "number",
-            minimum: 0,
-            maximum: 1
-          },
-          equipment_type: {
-            type: "string",
-            enum: [
-              "LADDER",
-              "MOBILE_ACCESS_PLATFORM",
-              "SCAFFOLD",
-              "FORKLIFT",
-              "REACH_STACKER",
-              "LIFTING_GEAR",
-              "CONTAINER_REPAIR",
-              "WELDING",
-              "GRINDING",
-              "ELECTRICAL_TOOL",
-              "CHEMICAL",
-              "VEHICLE",
-              "GENERAL"
-            ]
-          }
-        },
-        required: [
-          "category",
-          "title",
-          "observation",
-          "status",
-          "risk",
-          "confidence",
-          "equipment_type"
-        ]
-      }
-    }
-  },
-  required: ["findings"]
-};
-
-function responseToRawAI(response: any): string {
-  if (typeof response === "string") return response;
-
-  if (typeof response?.response === "string") {
-    return response.response;
-  }
-
-  if (response?.response && typeof response.response === "object") {
-    return JSON.stringify(response.response);
-  }
-
-  if (typeof response?.result === "string") {
-    return response.result;
-  }
-
-  if (response?.result && typeof response.result === "object") {
-    return JSON.stringify(response.result);
-  }
-
-  if (response?.findings && Array.isArray(response.findings)) {
-    return JSON.stringify({ findings: response.findings });
-  }
-
-  return "";
-}
-
-async function callVisionAI(
-  env: Env,
-  imageData: string,
-  prompt: string,
-  schema: any
-): Promise<any> {
-  const input: any = {
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are a workplace safety visual inspection assistant. Return ONLY a JSON object that conforms exactly to the supplied schema. Do not write explanations, Markdown, headings, bullets, or prose. Only report safety-relevant conditions that are visibly supported by the photograph. If no relevant safety condition is visible, return an empty findings array."
-      },
-      {
-        role: "user",
-        content: prompt
-      }
-    ],
-    image: imageData,
-    max_tokens: 900,
-    temperature: 0,
-    top_p: 0.7,
-    stream: false,
-    response_format: {
-      type: "json_schema",
-      json_schema: schema
-    }
-  };
-
-  return env.AI.run(MODEL, input);
-}
-
-const MINIMAL_AI_FINDINGS_SCHEMA = {
-  type: "object",
-  properties: {
-    findings: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          category: { type: "string" },
-          title: { type: "string" },
-          observation: { type: "string" },
-          status: {
-            type: "string",
-            enum: ["PASS", "FAIL", "CHECK_REQUIRED"]
-          },
-          risk: {
-            type: "string",
-            enum: ["LOW", "MEDIUM", "HIGH"]
-          },
-          confidence: {
-            type: "number",
-            minimum: 0,
-            maximum: 1
-          },
-          equipment_type: { type: "string" }
-        },
-        required: [
-          "category",
-          "title",
-          "observation",
-          "status",
-          "risk",
-          "confidence",
-          "equipment_type"
-        ]
-      }
-    }
-  },
-  required: ["findings"]
-};
-
-async function runAI(
-  env: Env,
-  image: ArrayBuffer,
-  contentType: string,
-  checks: SafetyCheck[]
-): Promise<{ raw: string; result: any; mode: string }> {
-  const imageData = imageDataUrl(image, contentType);
-
-  // Do NOT include Markdown formatting instructions here.
-  // JSON Schema is now the single source of truth for the AI output.
-  const prompt = `
-Analyse this workplace safety photograph for a Singapore container depot / repair yard.
-
-Return ONLY safety-relevant findings that are visibly supported by the photograph.
-
-Rules:
-- Do not report an item merely because it is not visible.
-- Do not create PASS findings such as "no forklift visible" or "no electrical equipment visible".
-- Do not infer that vehicles, chemicals, lifting operations or other activities exist merely because the location looks like a depot.
-- Do not report generic objects unless they create or represent a relevant safety condition.
-- PPE should only be reported when people and PPE are actually visible.
-- If an elevated platform, ladder, scaffold or access structure is visible, report Work at Height when relevant.
-- If lifting equipment, a lifting frame, spreader, sling, hook, SWL marking or lifting activity is visibly present, report Lifting when relevant.
-- Multiple relevant categories may be returned for the same photograph.
-- Describe only what can actually be seen.
-- If nothing safety-relevant can be established visually, return findings as an empty array.
-
-The system will determine WSHC check IDs, WSHC URLs and detailed inspection checklists separately using Vectorize and D1. Do not invent those values.
-`.trim();
-
-  let response: any;
-  let mode = "json_schema";
-  let firstError: unknown = null;
-
-  try {
-    response = await callVisionAI(
-      env,
-      imageData,
-      prompt,
-      AI_FINDINGS_JSON_SCHEMA
-    );
-  } catch (error) {
-    firstError = error;
-  }
-
-  /*
-   * If the full schema is rejected by the provider, retry with a deliberately
-   * simpler JSON Schema. We DO NOT fall back to json_object mode because that
-   * allows the vision model to return free-form Markdown/prose, which was the
-   * source of the previous failures.
-   */
-  if (!response) {
-    mode = "json_schema_minimal_fallback";
-
-    try {
-      response = await callVisionAI(
-        env,
-        imageData,
-        prompt,
-        MINIMAL_AI_FINDINGS_SCHEMA
-      );
-    } catch (secondError) {
-      throw new Error(
-        `Workers AI JSON Schema request failed. Full schema: ${
-          firstError instanceof Error
-            ? firstError.message
-            : String(firstError)
-        }. Minimal schema: ${
-          secondError instanceof Error
-            ? secondError.message
-            : String(secondError)
-        }`
-      );
-    }
-  }
-
-  const raw = responseToRawAI(response);
-
-  if (!raw.trim()) {
-    throw new Error(
-      `Workers AI returned no usable structured response. Response: ${JSON.stringify(response).substring(0, 5000)}`
-    );
-  }
-
-  // Verify that the returned content is actually our expected object before
-  // allowing the inspection pipeline to continue.
-  const parsed = extractJson(raw);
-
-  if (
-    !parsed ||
-    !Array.isArray(parsed.findings)
-  ) {
-    throw new Error(
-      `Workers AI returned non-structured output even though JSON Schema was requested. Raw AI output: ${raw.substring(0, 5000)}`
-    );
-  }
-
-  return {
-    raw: JSON.stringify(parsed),
-    result: response,
-    mode
-  };
-}
-
-function extractJson(text: string): any | null {
-  const cleaned = text
-    .replace(/```json/gi, "")
-    .replace(/```/g, "")
-    .trim();
-
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    // Try the first JSON object in the response.
-  }
-
-  const first = cleaned.indexOf("{");
-  const last = cleaned.lastIndexOf("}");
-  if (first >= 0 && last > first) {
-    try {
-      return JSON.parse(cleaned.substring(first, last + 1));
-    } catch {
-      return null;
-    }
-  }
-
-  return null;
-}
-
-function parseConfidence(value: unknown): number {
-  if (value === null || value === undefined || value === "") return 0.6;
-  let number = Number(String(value).replace("%", ""));
-  if (!Number.isFinite(number)) return 0.6;
-  if (number > 1) number /= 100;
-  return Math.round(Math.max(0, Math.min(1, number)) * 100) / 100;
-}
-
-function normalizeStatus(value: unknown, observation: string): Status {
-  const text = cleanMarkdown(value).toUpperCase();
-  if (text.includes("FAIL")) return "FAIL";
-  if (text.includes("PASS")) return "PASS";
-  if (text.includes("CHECK")) return "CHECK_REQUIRED";
-
-  const lower = observation.toLowerCase();
-  if (["unsafe", "hazard", "spill", "obstructed", "blocked", "missing", "damaged", "exposed", "unguarded"].some(w => lower.includes(w))) {
-    return "FAIL";
-  }
-  return "CHECK_REQUIRED";
-}
-
-function normalizeRisk(value: unknown, status: Status): Risk {
-  const text = cleanMarkdown(value).toUpperCase();
-  if (text.includes("HIGH")) return "HIGH";
-  if (text.includes("MEDIUM")) return "MEDIUM";
-  if (text.includes("LOW")) return "LOW";
-  if (status === "FAIL") return "HIGH";
-  if (status === "PASS") return "LOW";
-  return "MEDIUM";
-}
-
-function normalizeCategory(category: string): string {
-  const value = cleanMarkdown(category, 100).replace(/\s+/g, " ").trim();
-  const lower = value.toLowerCase();
-
-  if (lower === "ppe" || lower.includes("personal protective")) return "PPE";
-  if (lower.includes("housekeeping")) return "Housekeeping";
-  if (lower.includes("vehicular") || lower.includes("vehicle") || lower.includes("traffic")) return "Vehicular Safety";
-  if (lower.includes("work at height") || lower.includes("working at height")) return "Work at Height";
-  if (lower.includes("lifting")) return "Lifting";
-  if (lower.includes("electrical")) return "Electrical Safety";
-  if (lower.includes("fire")) return "Fire Safety";
-  if (lower.includes("storage")) return "Storage and Stacking";
-  if (lower.includes("chemical")) return "Chemical Safety";
-  if (lower.includes("confined")) return "Confined Space";
-  if (lower.includes("forklift") || lower.includes("fork lift")) return "Forklift Safety";
-  if (lower.includes("reach stacker")) return "Reach Stacker Safety";
-  if (lower.includes("loading") || lower.includes("unloading")) return "Loading and Unloading";
-  if (lower.includes("machinery") || lower.includes("machine")) return "Machinery Safety";
-  if (lower.includes("manual handling") || lower.includes("ergonomic")) return "Manual Handling";
-  if (lower.includes("hot work") || lower.includes("welding") || lower.includes("grinding")) return "Hot Work";
-  if (lower.includes("noise")) return "Noise";
-  if (lower.includes("risk assessment") || lower === "risk") return "Risk Assessment";
-  if (lower.includes("slip") || lower.includes("trip") || lower.includes("fall")) return "Slips, Trips and Falls";
-
-  return value;
-}
-
-function inferSafetyCategory(
-  category: string,
-  title: string,
-  observation: string
-): string {
-  const original = normalizeCategory(category);
-  const text = `${category} ${title} ${observation}`
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
-
-  /*
-   * Correct generic/object descriptions before WSHC matching.
-   * This prevents a generic "metal structure" or "person" finding
-   * from being matched to an unrelated safety category.
-   */
-
-  if (
-    /hard hat|helmet|high[- ]visibility vest|high[- ]visibility clothing|safety footwear|safety shoes|safety glasses|protective gloves|ppe/.test(text)
-  ) {
-    return "PPE";
-  }
-
-  if (
-    /ladder|scaffold|scaffolding|platform|guardrail|mid[- ]rail|toe[- ]board|elevated access|work at height|working at height/.test(text)
-  ) {
-    return "Work at Height";
-  }
-
-  if (
-    /swl\s*[:=]?\s*\d+|safe working load|lifting frame|lifting beam|lifting equipment|spreader|sling/.test(text)
-  ) {
-    /* If the same object is clearly elevated/access-related, Work at Height remains relevant.
-       Otherwise treat the visible SWL/lifting evidence as Lifting. */
-    if (!/platform|ladder|scaffold|elevated|work at height/.test(text)) {
-      return 'Lifting';
-    }
-  }
-
-  if (
-    /forklift|fork lift/.test(text)
-  ) {
-    return "Forklift Safety";
-  }
-
-  if (
-    /reach stacker|reachstacker/.test(text)
-  ) {
-    return "Reach Stacker Safety";
-  }
-
-  if (
-    /spreader|sling|lifting gear|lifting equipment|lifting hook|suspended load|crane/.test(text)
-  ) {
-    return "Lifting";
-  }
-
-  if (
-    /welding|weld|grinding|grinder|cutting|hot work|hot-work|torch|spark/.test(text)
-  ) {
-    return "Hot Work";
-  }
-
-  if (
-    /electrical cable|electrical cord|plug|socket|exposed wire|electric tool|power tool/.test(text)
-  ) {
-    return "Electrical Safety";
-  }
-
-  if (
-    /chemical|solvent|paint|container leak|chemical leak|spill kit/.test(text)
-  ) {
-    return "Chemical Safety";
-  }
-
-  if (
-    /oil spill|water spill|wet floor|slippery|trip hazard|obstructed walkway|blocked walkway|debris on floor|hose across walkway|cable across walkway/.test(text)
-  ) {
-    return "Slips, Trips and Falls";
-  }
-
-  if (
-    /blocked|obstruction|clutter|waste|rubbish|debris|poor housekeeping/.test(text)
-  ) {
-    return "Housekeeping";
-  }
-
-  if (
-    /vehicle|truck|lorry|traffic|pedestrian route|reversing|banksman/.test(text)
-  ) {
-    return "Vehicular Safety";
-  }
-
-  if (
-    /container repair|container maintenance|repairing container/.test(text)
-  ) {
-    return "Machinery Safety";
-  }
-
-  return original;
-}
-
-function isActualSafetyFinding(
-  category: string,
-  title: string,
-  observation: string,
-  status: Status
-): boolean {
-  const text = `${category} ${title} ${observation}`
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!text) return false;
-  if (isNegativeVisibilityText(text)) return false;
-
-  /* Generic scene/object descriptions are not safety findings. */
-  const genericObjectPatterns = [
-    /^visible person(?:\s|:)/,
-    /^person(?:\s|:)/,
-    /^visible metal structure(?:\s|:)/,
-    /^metal structure(?:\s|:)/,
-    /^visible concrete surface(?:\s|:)/,
-    /^concrete surface(?:\s|:)/,
-    /^visible road(?:\s|:)/,
-    /^road(?:\s|:)/,
-    /^visible container(?:\s|:)/,
-    /^container(?:\s|:)/,
-    /^visible object(?:\s|:)/,
-    /^object(?:\s|:)/,
-  ];
-
-  const isGenericTitle = genericObjectPatterns.some(re => re.test(text));
-
-  const positiveSafetySignals = [
-    "hazard",
-    "unsafe",
-    "damaged",
-    "broken",
-    "missing",
-    "exposed",
-    "unguarded",
-    "unsecured",
-    "unstable",
-    "blocked",
-    "obstructed",
-    "spill",
-    "leak",
-    "corrosion",
-    "corroded",
-    "crack",
-    "bent",
-    "trip",
-    "slip",
-    "guardrail",
-    "handrail",
-    "toe-board",
-    "top rung",
-    "ladder",
-    "platform",
-    "scaffold",
-    "forklift",
-    "reach stacker",
-    "lifting",
-    "welding",
-    "grinding",
-    "electrical",
-    "chemical",
-    "ppe",
-    "hard hat",
-    "helmet",
-    "high-visibility",
-    "safety footwear",
-    "safety shoes",
-    "confined space",
-    "fire extinguisher",
-    "storage",
-    "stack",
-    "manual handling",
-    "awkward posture",
-  ];
-
-  /* A generic object is acceptable only when the description contains
-     a genuine safety-relevant signal. */
-  if (isGenericTitle) {
-    if (!positiveSafetySignals.some(signal => text.includes(signal))) {
-      return false;
-    }
-  }
-
-  /* Generic positive descriptions of a surface/person/object are not findings. */
-  const nonFindingPatterns = [
-    "smooth and flat",
-    "appears to be a loading dock or a work area",
-    "has a few marks and stains on it",
-    "standing next to",
-    "large metal structure",
-    "appears to be working or inspecting",
-  ];
-
-  if (
-    nonFindingPatterns.some(pattern => text.includes(pattern)) &&
-    !positiveSafetySignals.some(signal => text.includes(signal))
-  ) {
-    return false;
-  }
-
-  /* A PASS finding is valid only when it is tied to an actual safety
-     category such as PPE, housekeeping, traffic segregation, etc. */
-  const validCategories = new Set([
-    "PPE",
-    "Housekeeping",
-    "Vehicular Safety",
-    "Work at Height",
-    "Lifting",
-    "Electrical Safety",
-    "Fire Safety",
-    "Storage and Stacking",
-    "Chemical Safety",
-    "Confined Space",
-    "Forklift Safety",
-    "Reach Stacker Safety",
-    "Loading and Unloading",
-    "Machinery Safety",
-    "Manual Handling",
-    "Hot Work",
-    "Noise",
-    "Risk Assessment",
-    "Slips, Trips and Falls",
-  ]);
-
-  if (!validCategories.has(category)) return false;
-
-  if (
-    category === 'Vehicular Safety' &&
-    /vehicles? may be present|vehicles? may be|suggests vehicles|presence of .*vehicles/.test(text) &&
-    !/actual vehicle|truck|lorry|forklift|reach stacker|traffic lane|reversing|banksman|pedestrian route/.test(text)
-  ) {
-    return false;
-  }
-
-  /* Category-specific relevance guard: do not infer a safety activity merely
-     because the background suggests it may exist. */
-  const categorySignals: Record<string, RegExp> = {
-    'Vehicular Safety': /vehicle|truck|lorry|forklift|reach stacker|traffic barrier|pedestrian route|reversing|banksman|roadway|traffic lane/,
-    'Forklift Safety': /forklift|fork lift/,
-    'Reach Stacker Safety': /reach stacker|reachstacker/,
-    'Electrical Safety': /electrical|cable|cord|plug|socket|wire|power tool|electric tool/,
-    'Chemical Safety': /chemical|solvent|paint container|paint can|spill kit|leak/,
-    'Confined Space': /confined space|manhole|tank|vessel|enclosed space/,
-    'Hot Work': /welding|weld|grinding|grinder|cutting|torch|spark|hot work/,
-    'Manual Handling': /manual handling|lifting by hand|carrying|awkward posture|heavy load by hand/,
-    'Noise': /noise|hearing protection|ear plug|earmuff/,
-    'Risk Assessment': /risk assessment|safe work procedure|swp|permit|permit board/,
-    'Fire Safety': /fire extinguisher|fire hose|fire alarm|fire exit|fire point|flammable/,
-  };
-  const signalPattern = categorySignals[category];
-  if (signalPattern && !signalPattern.test(text)) return false;
-
-  /* PASS is only meaningful when the photograph visibly supports the pass.
-     Never turn absence of an object into PASS. */
-  if (status === 'PASS') {
-    const passSignals = [
-      'wearing', 'appropriate', 'satisfactory', 'clear', 'clean',
-      'segregated', 'secured', 'guardrail', 'hard hat', 'helmet',
-      'high-visibility', 'no obstruction', 'properly', 'intact',
-      'in good condition', 'safe access', 'marked', 'labelled'
-    ];
-    if (!passSignals.some(signal => text.includes(signal))) return false;
-  }
-
-  return true;
-}
-
-function detectEquipmentType(category: string, title: string, observation: string, aiType?: string): string {
-  const text = `${category} ${title} ${observation}`
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
-
-  /*
-   * IMPORTANT:
-   *
-   * Do not blindly trust the AI equipment_type when the text contains
-   * a more specific structure. For example, the vision model may return
-   * LADDER for a mobile access structure because it sees ladders inside
-   * the structure. A phrase such as "ladder and platform" should therefore
-   * resolve to MOBILE_ACCESS_PLATFORM.
-   */
-
-  if (
-    text.includes("mobile access platform") ||
-    text.includes("mobile platform") ||
-    text.includes("access platform") ||
-    text.includes("platform with ladder") ||
-    text.includes("ladder and platform") ||
-    text.includes("ladder with platform") ||
-    text.includes("elevated access structure") ||
-    text.includes("elevated platform") ||
-    text.includes("access structure with") ||
-    (text.includes("work at height") && /metal frame|metal structure|platform|access structure/.test(text))
-  ) {
-    return "MOBILE_ACCESS_PLATFORM";
-  }
-
-  if (
-    text.includes("scaffold") ||
-    text.includes("scaffolding")
-  ) {
-    return "SCAFFOLD";
-  }
-
-  if (text.includes("reach stacker") || text.includes("reachstacker")) {
-    return "REACH_STACKER";
-  }
-
-  if (text.includes("forklift") || text.includes("fork lift")) {
-    return "FORKLIFT";
-  }
-
-  if (
-    text.includes("lifting frame") ||
-    text.includes("lifting beam") ||
-    text.includes("swl") ||
-    text.includes("safe working load") ||
-    text.includes("spreader") ||
-    text.includes("sling") ||
-    text.includes("lifting gear") ||
-    text.includes("lifting equipment") ||
-    text.includes("lifting hook")
-  ) {
-    return "LIFTING_GEAR";
-  }
-
-  if (text.includes("ladder")) {
-    return "LADDER";
-  }
-
-  if (text.includes("welding") || text.includes("weld")) {
-    return "WELDING";
-  }
-
-  if (text.includes("grinding") || text.includes("grinder")) {
-    return "GRINDING";
-  }
-
-  if (
-    text.includes("electrical tool") ||
-    text.includes("power tool") ||
-    text.includes("electric tool")
-  ) {
-    return "ELECTRICAL_TOOL";
-  }
-
-  if (
-    text.includes("chemical") ||
-    text.includes("solvent") ||
-    text.includes("paint container") ||
-    text.includes("paint can") ||
-    text.includes("paint chemical")
-  ) {
-    return "CHEMICAL";
-  }
-
-  if (
-    text.includes("container repair") ||
-    text.includes("container maintenance")
-  ) {
-    return "CONTAINER_REPAIR";
-  }
-
-  if (
-    text.includes("vehicle") ||
-    text.includes("truck") ||
-    text.includes("lorry")
-  ) {
-    return "VEHICLE";
-  }
-
-  /*
-   * Only use the AI supplied type after checking the actual description.
-   */
-  const explicit = clean(aiType, 80)
-    .toUpperCase()
-    .replace(/\s+/g, "_");
-
-  const allowed = new Set([
-    "LADDER",
-    "MOBILE_ACCESS_PLATFORM",
-    "SCAFFOLD",
-    "FORKLIFT",
-    "REACH_STACKER",
-    "LIFTING_GEAR",
-    "CONTAINER_REPAIR",
-    "WELDING",
-    "GRINDING",
-    "ELECTRICAL_TOOL",
-    "CHEMICAL",
-    "VEHICLE",
-    "GENERAL",
-  ]);
-
-  if (allowed.has(explicit)) return explicit;
-
-  return "GENERAL";
-}
-
-function isNegativeVisibilityText(text: string): boolean {
-  const value = text.toLowerCase().replace(/\s+/g, " ").trim();
-
-  const patterns = [
-    "no visible",
-    "not visible",
-    "no evidence",
-    "not observed",
-    "not apparent",
-    "no visible lifting",
-    "no visible electrical",
-    "no visible fire",
-    "no visible storage",
-    "no visible housekeeping",
-    "no visible vehicular",
-    "no visible chemical",
-    "no visible confined",
-    "no visible forklift",
-    "no visible reach stacker",
-    "no visible machinery",
-    "no visible manual handling",
-    "no visible hot work",
-    "no visible noise",
-    "no visible risk assessment",
-  ];
-
-  return patterns.some(pattern => value.includes(pattern));
-}
-
-function parseLegacyVisualResponse(raw: string): Array<{
-  category: string;
-  title: string;
-  observation: string;
-  status: Status;
-  risk: Risk;
-  confidence: number;
-  checkId: string;
-  equipmentType: string;
-}> {
-  const results: Array<{
-    category: string;
-    title: string;
-    observation: string;
-    status: Status;
-    risk: Risk;
-    confidence: number;
-    checkId: string;
-    equipmentType: string;
-  }> = [];
-
-  const text = raw.replace(/\r/g, '').trim();
-
-  // Format A: structured markdown blocks with Title/Observation fields.
-  const headingRegex = /(?:^|\n)\s*\*\*([^*\n]+)\*\*\s*(?=\n|$)/g;
-  const headings: Array<{ index: number; category: string }> = [];
-  let hm: RegExpExecArray | null;
-  while ((hm = headingRegex.exec(text)) !== null) {
-    const category = cleanMarkdown(hm[1], 120);
-    if (category && !['Title','Observation','Status','Risk','Confidence','Check ID','Category'].includes(category)) {
-      headings.push({ index: hm.index, category });
-    }
-  }
-
-  for (let i = 0; i < headings.length; i++) {
-    const startIndex = headings[i].index;
-    const endIndex = i + 1 < headings.length ? headings[i + 1].index : text.length;
-    const block = text.substring(startIndex, endIndex);
-    const category = normalizeCategory(headings[i].category);
-
-    const titleMatch = block.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Title:\*\*\s*(.+?)(?=\n|$)/i);
-    const observationMatch = block.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Observation:\*\*\s*(.+?)(?=\n|$)/i);
-    const statusMatch = block.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Status:\*\*\s*(PASS|FAIL|CHECK_REQUIRED)/i);
-    const riskMatch = block.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Risk:\*\*\s*(LOW|MEDIUM|HIGH)/i);
-    const confidenceMatch = block.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Confidence:\*\*\s*([0-9.]+)/i);
-    const checkIdMatch = block.match(/(?:^|\n)\s*(?:\*\s*)?\*\*Check ID:\*\*\s*([^\s\n]+)/i);
-
-    let observation = cleanMarkdown(observationMatch?.[1] || '', 1200);
-    if (!observation) {
-      const bullets = block.split('\n')
-        .map(line => line.replace(/^\s*[-*•]\s*/, '').trim())
-        .filter(line => line && !/^\*\*[^*]+\*\*$/.test(line))
-        .filter(line => !/^\*\*(Title|Observation|Status|Risk|Confidence|Check ID):/i.test(line))
-        .filter(line => !isNegativeVisibilityText(line))
-        .slice(0, 3);
-      observation = cleanMarkdown(bullets.join(' '), 1200);
-    }
-
-    if (!observation || isNegativeVisibilityText(`${category} ${observation}`)) continue;
-
-    const title = cleanMarkdown(titleMatch?.[1] || defaultFindingTitle(category, observation), 250);
-    const status = normalizeStatus(statusMatch?.[1] || '', observation);
-    const risk = normalizeRisk(riskMatch?.[1] || '', status);
-
-    results.push({
-      category,
-      title,
-      observation,
-      status,
-      risk,
-      confidence: parseConfidence(confidenceMatch?.[1] || ''),
-      checkId: cleanMarkdown(checkIdMatch?.[1] || '', 100),
-      equipmentType: detectEquipmentType(category, title, observation),
-    });
-    if (results.length >= MAX_FINDINGS) return results;
-  }
-
-  if (results.length) return results;
-
-  // Format B: bullet/colon format produced by the vision model, e.g.
-  // * **Work at Height**: The blue frame ... CHECK_REQUIRED
-  // * **Housekeeping**: ... PASS
-  const lineRegex = /(?:^|\n)\s*(?:[-*•]|\d+[.)])\s*\*\*([^*\n]+)\*\*\s*[:\-–—]\s*(.+?)(?=\n\s*(?:[-*•]|\d+[.)])\s*\*\*|$)/gs;
-  let lm: RegExpExecArray | null;
-  while ((lm = lineRegex.exec(text)) !== null) {
-    const category = normalizeCategory(cleanMarkdown(lm[1], 120));
-    let body = cleanMarkdown(lm[2], 1400);
-    if (!category || !body || isNegativeVisibilityText(body)) continue;
-
-    const statusMatch = body.match(/\b(PASS|FAIL|CHECK_REQUIRED)\b/i);
-    const riskMatch = body.match(/\b(LOW|MEDIUM|HIGH)\s+risk\b/i);
-    const confidenceMatch = body.match(/\b(?:confidence|AI confidence)\s*[:=]?\s*([0-9.]+%?)\b/i);
-    const checkIdMatch = body.match(/\b(?:check\s*id)\s*[:=]?\s*([A-Za-z0-9_-]+)\b/i);
-
-    const status = normalizeStatus(statusMatch?.[1] || '', body);
-    const risk = normalizeRisk(riskMatch?.[1] || '', status);
-    const confidence = parseConfidence(confidenceMatch?.[1] || '');
-
-    body = body
-      .replace(/(?:Therefore,?\s*)?(?:a|the)\s+(?:PASS|FAIL|CHECK_REQUIRED)?\s*status\s+is\s+(?:assigned|given)\.?/ig, '')
-      .replace(/\b(?:PASS|FAIL|CHECK_REQUIRED)\b(?:\s+status)?/ig, '')
-      .replace(/\b(?:LOW|MEDIUM|HIGH)\s+risk\b/ig, '')
-      .replace(/\b(?:confidence|AI confidence)\s*[:=]?\s*[0-9.]+%?\b/ig, '')
-      .replace(/\b(?:check\s*id)\s*[:=]?\s*[A-Za-z0-9_-]+\b/ig, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    if (!body) continue;
-
-    const equipmentType = detectEquipmentType(category, category, body);
-    results.push({
-      category,
-      title: defaultFindingTitle(category, body),
-      observation: body,
-      status,
-      risk,
-      confidence,
-      checkId: cleanMarkdown(checkIdMatch?.[1] || '', 100),
-      equipmentType,
-    });
-    if (results.length >= MAX_FINDINGS) break;
-  }
-
-  return results;
-}
-
-function defaultFindingTitle(category: string, observation: string): string {
-  const text = observation.toLowerCase();
-  if (category === 'Work at Height' && /platform|ladder|scaffold|elevated/.test(text)) {
-    return 'Elevated access structure requires verification';
-  }
-  if (category === 'Lifting' && /swl|lifting|sling|spreader|frame/.test(text)) {
-    return 'Lifting equipment requires verification';
-  }
-  if (category === 'PPE') return 'Visible PPE appears appropriate';
-  if (category === 'Housekeeping') return 'Housekeeping condition requires review';
-  return `Visible ${category.toLowerCase()} condition`;
-}
-
-function parseStructuredAIResponse(raw: string): Array<{
-  category: string;
-  title: string;
-  observation: string;
-  status: Status;
-  risk: Risk;
-  confidence: number;
-  checkId: string;
-  equipmentType: string;
-}> {
-  const results: Array<{
-    category: string;
-    title: string;
-    observation: string;
-    status: Status;
-    risk: Risk;
-    confidence: number;
-    checkId: string;
-    equipmentType: string;
-  }> = [];
-
-  const json = extractJson(raw);
-  if (json) {
-    const source = Array.isArray(json)
-      ? json
-      : Array.isArray(json.findings)
-        ? json.findings
-        : Array.isArray(json.response?.findings)
-          ? json.response.findings
-          : Array.isArray(json.result?.findings)
-            ? json.result.findings
-            : null;
-
-    if (source) {
-      for (const item of source) {
-        if (!item || typeof item !== 'object') continue;
-        const category = normalizeCategory(cleanMarkdown((item as any).category || '', 120));
-        const title = cleanMarkdown((item as any).title || defaultFindingTitle(category, (item as any).observation || ''), 250);
-        const observation = cleanMarkdown((item as any).observation || '', 1200);
-        if (!category || !observation) continue;
-        if (isNegativeVisibilityText(`${category} ${title} ${observation}`)) continue;
-
-        const status = normalizeStatus((item as any).status, observation);
-        const risk = normalizeRisk((item as any).risk, status);
-        const equipmentType = detectEquipmentType(
-          category,
-          title,
-          observation,
-          (item as any).equipment_type
-        );
-
-        results.push({
-          category,
-          title,
-          observation,
-          status,
-          risk,
-          confidence: parseConfidence((item as any).confidence),
-          checkId: cleanMarkdown((item as any).check_id || '', 100),
-          equipmentType,
-        });
-        if (results.length >= MAX_FINDINGS) break;
-      }
-      if (results.length) return results;
-    }
-  }
-
-  const legacy = parseLegacyVisualResponse(raw);
-  if (legacy.length) return legacy;
-
-  throw new Error(
-    `Scene analysis returned no usable structured findings. Raw AI output: ${raw.substring(0, 5000)}`
-  );
-}
-
-function findCheck(
-  finding: { category: string; title: string; observation: string; checkId: string },
-  checks: SafetyCheck[]
-): SafetyCheck | null {
-  if (finding.checkId) {
-    const exact = checks.find(check => check.id === finding.checkId);
-    if (exact) return exact;
-  }
-
-  const category = normalizeCategory(finding.category);
-
-  const categoryMatches = checks.filter(
-    check =>
-      normalizeCategory(check.category).toLowerCase() ===
-      category.toLowerCase()
-  );
-
-  if (categoryMatches.length === 1) return categoryMatches[0];
-
-  if (!categoryMatches.length) {
-    /* Do not match an arbitrary WSHC category just because a keyword such as
-       "surface", "equipment" or "condition" happens to overlap. */
-    return null;
-  }
-
-  const combined = `${category} ${finding.title} ${finding.observation}`.toLowerCase();
-  let best: SafetyCheck | null = null;
-  let bestScore = 0;
-
-  for (const check of categoryMatches) {
-    const keywords = clean(check.keywords, 500)
-      .toLowerCase()
-      .split(/[,;|]+/)
-      .map(w => w.trim())
-      .filter(w => w.length >= 3);
-
-    let score = 0;
-    for (const keyword of keywords) {
-      if (combined.includes(keyword)) score++;
-    }
-
-    if (score > bestScore) {
-      bestScore = score;
-      best = check;
-    }
-  }
-
-  return bestScore > 0 ? best : categoryMatches[0] || null;
-}
-
-function checklistEquipmentTypes(equipmentType: string): string[] {
-  const type = clean(equipmentType, 80).toUpperCase();
-
-  const map: Record<string, string[]> = {
-    MOBILE_ACCESS_PLATFORM: [
-      "MOBILE_ACCESS_PLATFORM",
-      "LADDER",
-      "GENERAL",
-    ],
-    SCAFFOLD: [
-      "SCAFFOLD",
-      "MOBILE_ACCESS_PLATFORM",
-      "GENERAL",
-    ],
-    LADDER: [
-      "LADDER",
-      "GENERAL",
-    ],
-    FORKLIFT: [
-      "FORKLIFT",
-      "VEHICLE",
-      "GENERAL",
-    ],
-    REACH_STACKER: [
-      "REACH_STACKER",
-      "VEHICLE",
-      "GENERAL",
-    ],
-    LIFTING_GEAR: [
-      "LIFTING_GEAR",
-      "GENERAL",
-    ],
-    WELDING: [
-      "WELDING",
-      "HOT_WORK",
-      "GENERAL",
-    ],
-    GRINDING: [
-      "GRINDING",
-      "HOT_WORK",
-      "GENERAL",
-    ],
-    ELECTRICAL_TOOL: [
-      "ELECTRICAL_TOOL",
-      "GENERAL",
-    ],
-    CHEMICAL: [
-      "CHEMICAL",
-      "GENERAL",
-    ],
-    CONTAINER_REPAIR: [
-      "CONTAINER_REPAIR",
-      "GENERAL",
-    ],
-    VEHICLE: [
-      "VEHICLE",
-      "GENERAL",
-    ],
-    GENERAL: [
-      "GENERAL",
-    ],
-  };
-
-  return map[type] || [type, "GENERAL"];
-}
-
-async function loadChecklistItems(
-  env: Env,
-  checkId: string,
-  equipmentType: string
-): Promise<ChecklistItem[]> {
-  await ensureChecklistTable(env);
-
-  const equipmentTypes = checklistEquipmentTypes(equipmentType);
-  const placeholders = equipmentTypes.map(() => "?").join(", ");
-
-  const result = await env.SAFETY_DB.prepare(`
-    SELECT
-      id,
-      safety_check_id,
-      equipment_type,
-      check_item,
-      check_type,
-      importance,
-      source_title,
-      source_url,
-      source_type,
-      active
-    FROM safety_check_items
-    WHERE safety_check_id = ?
-      AND active = 1
-      AND equipment_type IN (${placeholders})
-    ORDER BY
-      CASE equipment_type
-        ${equipmentTypes.map((type, index) => `WHEN '${type.replace(/'/g, "''")}' THEN ${index + 1}`).join("\n        ")}
-        ELSE 99
-      END,
-      CASE importance
-        WHEN 'HIGH' THEN 1
-        WHEN 'MEDIUM' THEN 2
-        ELSE 3
-      END,
-      CASE check_type
-        WHEN 'VISUAL' THEN 1
-        WHEN 'BOTH' THEN 2
-        ELSE 3
-      END,
-      id
-    LIMIT ?
-  `)
-    .bind(checkId, ...equipmentTypes, MAX_CHECKLIST_ITEMS)
-    .all<ChecklistItem>();
-
-  const seen = new Set<string>();
-
-  return (result.results || [])
-    .filter(item => {
-      if (seen.has(item.id)) return false;
-      seen.add(item.id);
-      return true;
-    })
-    .map(item => ({
-      ...item,
-      check_type: (item.check_type || "PHYSICAL") as CheckType,
-      importance: (item.importance || "MEDIUM") as Risk,
-      source_type: (item.source_type || "WSHC_DERIVED") as SourceType,
-    }));
-}
-
-async function searchRelevantWSHCChecks(env: Env, text: string): Promise<any[]> {
-  try {
-    const embeddingResponse: any = await env.AI.run(
-      EMBEDDING_MODEL,
-      { text: [text] } as any
-    );
-
-    const vector = embeddingResponse?.data?.[0];
-    if (!Array.isArray(vector) || vector.length !== VECTOR_DIMENSIONS) return [];
-
-    const result: any = await env.VECTORIZE.query(vector, {
-      topK: 6,
-      returnMetadata: true,
-    } as any);
-
-    return (result?.matches || []).filter(
-      (match: any) => Number(match.score || 0) >= VECTOR_MATCH_THRESHOLD
-    );
-  } catch {
-    return [];
-  }
-}
-
-async function enrichFinding(
-  env: Env,
-  finding: Finding,
-  checks: SafetyCheck[]
-): Promise<Finding> {
-  const equipmentType = finding.equipment_type || detectEquipmentType(
-    finding.category,
-    finding.title,
-    finding.observation
-  );
-
-  const matches = await searchRelevantWSHCChecks(
-    env,
-    `${finding.category} ${equipmentType} ${finding.title} ${finding.observation}`
-  );
-
-  let selectedCheck: SafetyCheck | null = null;
-
-  if (finding.check_id) {
-    selectedCheck = checks.find(check => check.id === finding.check_id) || null;
-  }
-
-  if (!selectedCheck && matches.length) {
-    const targetCategory = normalizeCategory(finding.category).toLowerCase();
-
-    for (const match of matches) {
-      const id = clean(match.id || match.metadata?.check_id || "", 100);
-      const candidate = checks.find(check => check.id === id);
-      if (!candidate) continue;
-
-      const candidateCategory = normalizeCategory(
-        clean(match.metadata?.category || candidate.category, 150)
-      ).toLowerCase();
-
-      if (candidateCategory !== targetCategory) continue;
-
-      selectedCheck = candidate;
-      break;
-    }
-  }
-
-  if (!selectedCheck) {
-    selectedCheck = findCheck(
-      {
-        category: finding.category,
-        title: finding.title,
-        observation: finding.observation,
-        checkId: "",
-      },
-      checks
-    );
-  }
-
-  if (!selectedCheck) {
-    return {
-      ...finding,
-      equipment_type: equipmentType,
-      visual_checks: [],
-      physical_checks: [],
-    };
-  }
-
-  const checklist = await loadChecklistItems(
-    env,
-    selectedCheck.id,
-    equipmentType
-  );
-
-  return {
-    ...finding,
-    check_id: selectedCheck.id,
-    source_title: selectedCheck.source_title,
-    source_url: selectedCheck.source_url,
-    source_type: (selectedCheck.source_type || "WSHC_DERIVED") as SourceType,
-    equipment_type: equipmentType,
-    visual_checks: checklist.filter(item => item.check_type === "VISUAL" || item.check_type === "BOTH"),
-    physical_checks: checklist.filter(item => item.check_type === "PHYSICAL" || item.check_type === "BOTH"),
-  };
-}
-
-function inferSecondaryCategories(
-  category: string,
-  title: string,
-  observation: string,
-  equipmentType: string
-): string[] {
-  const text = `${category} ${title} ${observation} ${equipmentType}`.toLowerCase();
-  const categories: string[] = [];
-
-  if (
-    /swl\s*[:=]?\s*\d+|safe working load|lifting frame|lifting beam|spreader|sling|lifting gear/.test(text) &&
-    !categories.includes('Lifting')
-  ) {
-    categories.push('Lifting');
-  }
-
-  if (
-    /platform|ladder|scaffold|elevated access|work at height|fall protection|guardrail/.test(text) &&
-    !categories.includes('Work at Height')
-  ) {
-    categories.push('Work at Height');
-  }
-
-  if (
-    /welding|weld|grinding|cutting|hot work|torch|spark/.test(text) &&
-    !categories.includes('Hot Work')
-  ) {
-    categories.push('Hot Work');
-  }
-
-  if (
-    /forklift|reach stacker|truck|lorry|vehicle|traffic|reversing/.test(text) &&
-    !categories.includes('Vehicular Safety')
-  ) {
-    categories.push('Vehicular Safety');
-  }
-
-  return categories;
-}
-
-async function normalizeFindings(
-  parsed: Array<{
-    category: string;
-    title: string;
-    observation: string;
-    status: Status;
-    risk: Risk;
-    confidence: number;
-    checkId: string;
-    equipmentType: string;
-  }>,
-  checks: SafetyCheck[],
-  env: Env
-): Promise<Finding[]> {
-  const output: Finding[] = [];
-  const seen = new Set<string>();
-
-  for (const item of parsed) {
-    const rawCategory = normalizeCategory(item.category || "");
-    const title = cleanMarkdown(item.title, 250);
-    const observation = cleanMarkdown(item.observation, 1200);
-
-    if (!observation) continue;
-
-    /* Infer a real WSH category from the visible evidence before matching. */
-    const category = inferSafetyCategory(
-      rawCategory,
-      title,
-      observation
-    );
-
-    let status = item.status;
-    let risk = item.risk;
-
-    /* If the model described PPE positively under a generic person finding,
-       turn it into a proper PPE PASS finding. */
-    if (
-      category === "PPE" &&
-      /hard hat|helmet|high[- ]visibility vest|high[- ]visibility clothing/.test(
-        `${title} ${observation}`.toLowerCase()
-      ) &&
-      !/missing|without|not wearing|unsafe|damaged/.test(
-        `${title} ${observation}`.toLowerCase()
-      )
-    ) {
-      status = "PASS";
-      risk = "LOW";
-    }
-
-    if (!isActualSafetyFinding(category, title, observation, status)) {
-      continue;
-    }
-
-    const key = `${category}|${title}|${observation}`
-      .toLowerCase()
-      .replace(/\s+/g, " ");
-
-    if (seen.has(key)) continue;
-    seen.add(key);
-
-    const detectedEquipment = detectEquipmentType(
-      category,
-      title,
-      observation,
-      item.equipmentType
-    );
-
-    const check = findCheck(
-      {
-        category,
-        title,
-        observation,
-        checkId: item.checkId,
-      },
-      checks
-    );
-
-    const base: Finding = {
-      category,
-      title,
-      observation,
-      status,
-      risk_level: risk,
-      confidence: Math.round(
-        Math.max(0, Math.min(1, item.confidence)) * 100
-      ) / 100,
-      check_id: check?.id || null,
-      source_title: check?.source_title || null,
-      source_url: check?.source_url || null,
-      source_type: (check?.source_type || null) as SourceType | null,
-      equipment_type: detectedEquipment,
-      visual_checks: [],
-      physical_checks: [],
-    };
-
-    const enriched = await enrichFinding(env, base, checks);
-
-    /* Never retain an unrelated WSHC match. */
-    if (
-      enriched.check_id &&
-      normalizeCategory(enriched.category).toLowerCase() !==
-        normalizeCategory(
-          checks.find(c => c.id === enriched.check_id)?.category || ""
-        ).toLowerCase()
-    ) {
-      continue;
-    }
-
-    output.push(enriched);
-
-    /* Add a secondary safety category when the same visible equipment clearly
-       has more than one safety relevance, e.g. a frame marked SWL with an
-       elevated platform can be both Lifting and Work at Height. */
-    if (output.length < MAX_FINDINGS) {
-      const secondaryCategories = inferSecondaryCategories(
-        category,
-        title,
-        observation,
-        detectedEquipment
-      ).filter(c => c.toLowerCase() !== category.toLowerCase());
-
-      for (const secondaryCategory of secondaryCategories) {
-        if (output.length >= MAX_FINDINGS) break;
-        const secondaryCheck = findCheck(
-          {
-            category: secondaryCategory,
-            title,
-            observation,
-            checkId: ''
-          },
-          checks
-        );
-        if (!secondaryCheck) continue;
-
-        const secondaryBase: Finding = {
-          ...enriched,
-          category: secondaryCategory,
-          check_id: secondaryCheck.id,
-          source_title: secondaryCheck.source_title,
-          source_url: secondaryCheck.source_url,
-          source_type: (secondaryCheck.source_type || 'WSHC_DERIVED') as SourceType,
-          status: 'CHECK_REQUIRED',
-          risk_level: enriched.risk_level === 'LOW' ? 'MEDIUM' : enriched.risk_level,
-          equipment_type: detectedEquipment,
-          visual_checks: [],
-          physical_checks: [],
-        };
-        const secondaryEnriched = await enrichFinding(env, secondaryBase, checks);
-        const secondaryKey = `${secondaryEnriched.category}|${secondaryEnriched.title}|${secondaryEnriched.observation}`
-          .toLowerCase()
-          .replace(/\s+/g, ' ');
-        if (!seen.has(secondaryKey)) {
-          seen.add(secondaryKey);
-          output.push(secondaryEnriched);
-        }
-      }
-    }
-
-    if (output.length >= MAX_FINDINGS) break;
-  }
-
-  return output;
-}
-
-function overall(findings: Finding[]): "PASS" | "ATTENTION" | "CHECK_REQUIRED" {
-  if (!findings.length) return "CHECK_REQUIRED";
-  if (findings.some(f => f.status === "FAIL")) return "ATTENTION";
-  if (findings.some(f => f.status === "CHECK_REQUIRED")) return "CHECK_REQUIRED";
-  return "PASS";
-}
-
-function buildSummary(findings: Finding[]): string {
-  if (!findings.length) {
-    return "No relevant visible safety conditions were identified from the photograph.";
-  }
-
-  const pass = findings.filter(f => f.status === "PASS").length;
-  const fail = findings.filter(f => f.status === "FAIL").length;
-  const check = findings.filter(f => f.status === "CHECK_REQUIRED").length;
-
-  if (fail > 0) {
-    return `${fail} visible safety finding(s) require corrective attention. ${check} item(s) require verification and ${pass} item(s) passed.`;
-  }
-
-  if (check > 0) {
-    return `${check} visible safety item(s) require verification. ${pass} item(s) passed.`;
-  }
-
-  return `${pass} visible safety item(s) were assessed as PASS.`;
-}
-
-async function insertInspection(
-  env: Env,
-  id: string,
-  inspectionNo: string,
-  location: string,
-  inspector: string,
-  createdAt: string
-): Promise<void> {
-  const columns = await getTableColumns(env.SAFETY_DB, "inspections");
-
-  const insert = buildInsert("inspections", columns, {
-    id,
-    inspection_no: inspectionNo,
-    location: location || null,
-    inspector: inspector || null,
-    created_at: createdAt,
-    overall_result: "CHECK_REQUIRED",
-  });
-
-  await env.SAFETY_DB.prepare(insert.sql).bind(...insert.params).run();
-}
-
-async function insertPhoto(
-  env: Env,
-  photoId: string,
-  inspectionId: string,
-  objectKey: string,
-  fileName: string,
-  contentType: string,
-  createdAt: string
-): Promise<void> {
-  const columns = await getTableColumns(env.SAFETY_DB, "inspection_photos");
-
-  if (!columns.has("object_key")) {
-    throw new Error("inspection_photos.object_key column does not exist.");
-  }
-
-  const insert = buildInsert("inspection_photos", columns, {
-    id: photoId,
-    inspection_id: inspectionId,
-    object_key: objectKey,
-    file_name: fileName,
-    content_type: contentType,
-    created_at: createdAt,
-  });
-
-  await env.SAFETY_DB.prepare(insert.sql).bind(...insert.params).run();
-}
-
-async function insertInspectionItems(
-  env: Env,
-  inspectionId: string,
-  photoId: string,
-  findings: Finding[]
-): Promise<void> {
-  if (!findings.length) return;
-
-  const columns = await getTableColumns(env.SAFETY_DB, "inspection_items");
-
-  const statements = findings.map(finding => {
-    const insert = buildInsert("inspection_items", columns, {
-      id: uuid(),
-      inspection_id: inspectionId,
-      photo_id: photoId,
-      category: finding.category,
-      title: finding.title,
-      observation: finding.observation,
-      status: finding.status,
-      risk_level: finding.risk_level,
-      confidence: finding.confidence,
-      check_id: finding.check_id,
-      source_title: finding.source_title,
-      source_url: finding.source_url,
-      source_type: finding.source_type,
-      equipment_type: finding.equipment_type,
-      created_at: nowISO(),
-    });
-
-    return env.SAFETY_DB.prepare(insert.sql).bind(...insert.params);
-  });
-
-  await env.SAFETY_DB.batch(statements);
-}
-
-async function updateInspection(
-  env: Env,
-  inspectionId: string,
-  result: "PASS" | "ATTENTION" | "CHECK_REQUIRED"
-): Promise<void> {
-  const columns = await getTableColumns(env.SAFETY_DB, "inspections");
-  if (!columns.has("overall_result")) return;
-
-  await env.SAFETY_DB.prepare(`
-    UPDATE inspections SET overall_result = ? WHERE id = ?
-  `).bind(result, inspectionId).run();
-}
-
-async function uploadToR2(
-  env: Env,
-  objectKey: string,
-  photo: PhotoInput,
-  metadata: { inspectionId: string; photoId: string; inspectionNo: string }
-): Promise<void> {
-  await env.PHOTOS.put(objectKey, photo.bytes, {
-    httpMetadata: {
-      contentType: photo.contentType,
-      contentDisposition: `inline; filename="${photo.fileName}"`,
-    },
-    customMetadata: {
-      inspectionId: metadata.inspectionId,
-      photoId: metadata.photoId,
-      inspectionNo: metadata.inspectionNo,
-    },
-  });
-}
-
-async function analyze(request: Request, env: Env): Promise<Response> {
-  let stage = "starting";
-  let inspectionId = "";
-  let photoId = "";
-  let objectKey = "";
-  let r2Uploaded = false;
-
-  try {
-    const input = await parseRequest(request);
-    const photo = input.photo;
-
-    stage = "create IDs";
-    inspectionId = uuid();
-    photoId = uuid();
-    const inspectionNo = inspectionNumber();
-    const createdAt = nowISO();
-
-    objectKey = `inspections/${inspectionId}/${photoId}.${extension(photo.contentType)}`;
-
-    stage = "D1 create inspection";
-    await insertInspection(env, inspectionId, inspectionNo, input.location, input.inspector, createdAt);
-
-    stage = "R2 upload";
-    await uploadToR2(env, objectKey, photo, { inspectionId, photoId, inspectionNo });
-    r2Uploaded = true;
-
-    stage = "D1 save inspection photo";
-    await insertPhoto(env, photoId, inspectionId, objectKey, photo.fileName, photo.contentType, createdAt);
-
-    stage = "D1 load safety checks";
-    const checks = await loadSafetyChecks(env);
-
-    stage = "Workers AI scene analysis";
-    const ai = await runAI(env, photo.bytes, photo.contentType, checks);
-
-    stage = "parse AI JSON";
-    const parsed = parseStructuredAIResponse(ai.raw);
-
-    stage = "Vectorize + WSHC checklist enrichment";
-    const findings = await normalizeFindings(parsed, checks, env);
-
-    stage = "D1 save inspection items";
-    await insertInspectionItems(env, inspectionId, photoId, findings);
-
-    const result = overall(findings);
-
-    stage = "D1 update inspection";
-    await updateInspection(env, inspectionId, result);
-
-    return jsonResponse({
-      ok: true,
-      inspection: {
-        id: inspectionId,
-        inspection_no: inspectionNo,
-        location: input.location,
-        inspector: input.inspector,
-        overall_result: result,
-        created_at: createdAt,
-      },
-      photo: {
-        id: photoId,
-        object_key: objectKey,
-        file_name: photo.fileName,
-        content_type: photo.contentType,
-      },
-      ai: {
-        model: MODEL,
-        embedding_model: EMBEDDING_MODEL,
-        vectorize_index: "safety-checks",
-        vector_match_threshold: VECTOR_MATCH_THRESHOLD,
-        structured_output_mode: ai.mode,
-        response_length: ai.raw.length,
-        response_preview: ai.raw.substring(0, 3000),
-      },
-      summary: buildSummary(findings),
-      findings,
-      counts: {
-        total: findings.length,
-        pass: findings.filter(f => f.status === "PASS").length,
-        fail: findings.filter(f => f.status === "FAIL").length,
-        check_required: findings.filter(f => f.status === "CHECK_REQUIRED").length,
-      },
-    });
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-
-    if (r2Uploaded && objectKey) {
-      try { await env.PHOTOS.delete(objectKey); } catch {}
-    }
-
-    if (inspectionId) {
-      try { await updateInspection(env, inspectionId, "CHECK_REQUIRED"); } catch {}
-    }
-
-    return jsonResponse({
-      ok: false,
-      error: "AI analysis failed.",
-      stage,
-      detail,
-      inspectionId: inspectionId || null,
-      photoId: photoId || null,
-      objectKey: objectKey || null,
-    }, 500);
-  }
-}
-
-async function getInspection(env: Env, id: string): Promise<Response> {
-  try {
-    const inspection = await env.SAFETY_DB.prepare(`
-      SELECT * FROM inspections WHERE id = ? LIMIT 1
-    `).bind(id).first();
-
-    if (!inspection) return jsonResponse({ ok: false, error: "Inspection not found." }, 404);
-
-    const photos = await env.SAFETY_DB.prepare(`
-      SELECT * FROM inspection_photos
-      WHERE inspection_id = ?
-      ORDER BY created_at
-    `).bind(id).all();
-
-    const items = await env.SAFETY_DB.prepare(`
-      SELECT ii.*, sc.check_question, sc.guidance, sc.source_type
-      FROM inspection_items ii
-      LEFT JOIN safety_checks sc ON sc.id = ii.check_id
-      WHERE ii.inspection_id = ?
-      ORDER BY ii.created_at
-    `).bind(id).all();
-
-    await ensureChecklistTable(env);
-
-    const checklist: Record<string, ChecklistItem[]> = {};
-    for (const item of (items.results || []) as any[]) {
-      if (!item.check_id) continue;
-      const equipmentType = detectEquipmentType(
-        item.category || "",
-        item.title || "",
-        item.observation || ""
-      );
-      checklist[item.id] = await loadChecklistItems(env, item.check_id, equipmentType);
-    }
-
-    return jsonResponse({
-      ok: true,
-      inspection,
-      photos: photos.results || [],
-      findings: items.results || [],
-      checklists: checklist,
-    });
-  } catch (error) {
-    return jsonResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }, 500);
-  }
-}
-
-async function recentInspections(env: Env): Promise<Response> {
-  try {
-    const result = await env.SAFETY_DB.prepare(`
-      SELECT * FROM inspections ORDER BY created_at DESC LIMIT 30
-    `).all();
-
-    return jsonResponse({ ok: true, inspections: result.results || [] });
-  } catch (error) {
-    return jsonResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }, 500);
-  }
-}
-
-async function safetyChecks(env: Env): Promise<Response> {
-  try {
-    const checks = await loadSafetyChecks(env);
-    return jsonResponse({ ok: true, count: checks.length, checks });
-  } catch (error) {
-    return jsonResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }, 500);
-  }
-}
-
-async function getChecklist(env: Env, request: Request): Promise<Response> {
-  try {
-    await ensureChecklistTable(env);
-    const url = new URL(request.url);
-    const checkId = clean(url.searchParams.get("check_id") || "", 100);
-    const equipmentType = clean(url.searchParams.get("equipment_type") || "GENERAL", 100);
-
-    if (!checkId) return jsonResponse({ ok: false, error: "Missing check_id." }, 400);
-
-    const items = await loadChecklistItems(env, checkId, equipmentType);
-    return jsonResponse({
-      ok: true,
-      check_id: checkId,
-      equipment_type: equipmentType,
-      count: items.length,
-      visual_checks: items.filter(i => i.check_type === "VISUAL" || i.check_type === "BOTH"),
-      physical_checks: items.filter(i => i.check_type === "PHYSICAL" || i.check_type === "BOTH"),
-    });
-  } catch (error) {
-    return jsonResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }, 500);
-  }
-}
-
-async function getPhoto(env: Env, objectKey: string): Promise<Response> {
-  try {
-    const object = await env.PHOTOS.get(objectKey);
-    if (!object) return textResponse("Photo not found.", 404);
-
-    const headers = new Headers();
-    object.writeHttpMetadata(headers);
-    headers.set("ETag", object.httpEtag);
-    headers.set("Cache-Control", "private, max-age=3600");
-
-    return new Response(object.body, { status: 200, headers });
-  } catch (error) {
-    return textResponse(error instanceof Error ? error.message : String(error), 500);
-  }
-}
-
-async function health(env: Env): Promise<Response> {
-  let database = false;
-  let safetyChecks = false;
-  let r2 = false;
-  let vectorize = false;
-  let checklist = false;
-
-  try {
-    await env.SAFETY_DB.prepare("SELECT 1 AS ok").first();
-    database = true;
-  } catch {}
-
-  try {
-    await loadSafetyChecks(env);
-    safetyChecks = true;
-  } catch {}
-
-  try { r2 = !!env.PHOTOS; } catch {}
-  try { vectorize = !!env.VECTORIZE; } catch {}
-
-  try {
-    await ensureChecklistTable(env);
-    checklist = true;
-  } catch {}
-
-  return jsonResponse({
-    ok: database && safetyChecks && r2 && vectorize && checklist,
-    worker: "depot-safety",
-    version: "2.6",
-    model: MODEL,
-    embedding_model: EMBEDDING_MODEL,
-    database,
-    safety_checks: safetyChecks,
-    r2,
-    vectorize,
-    vectorize_index: "safety-checks",
-    vectorize_dimensions: VECTOR_DIMENSIONS,
-    vector_match_threshold: VECTOR_MATCH_THRESHOLD,
-    checklist,
-    timestamp: nowISO(),
-  });
-}
-
-function requireSeedKey(request: Request, env: Env): void {
-  const configured = clean(env.VECTORIZE_SEED_KEY, 500);
-  if (!configured) {
-    throw new Error("VECTORIZE_SEED_KEY is not configured. Create this Worker secret before running the seed operation.");
-  }
-
-  const supplied =
-    request.headers.get("X-Vectorize-Seed-Key") ||
-    request.headers.get("X-Vectorize-Seed-Key".toLowerCase()) ||
-    "";
-
-  if (supplied !== configured) {
-    throw new Error("Invalid Vectorize seed key.");
-  }
-}
-
-async function seedVectorize(request: Request, env: Env): Promise<Response> {
-  try {
-    requireSeedKey(request, env);
-
-    const checks = await loadSafetyChecks(env);
-    if (!checks.length) return jsonResponse({ ok: false, error: "No active safety checks found." }, 400);
-
-    const inputs = checks.map(check =>
-      `${check.category}. ${check.check_question}. ${check.guidance}. Keywords: ${check.keywords}`
-    );
-
-    const embeddingResponse: any = await env.AI.run(
-      EMBEDDING_MODEL,
-      { text: inputs } as any
-    );
-
-    const vectors = embeddingResponse?.data;
-    if (!Array.isArray(vectors) || vectors.length !== checks.length) {
-      throw new Error("Embedding model returned an unexpected number of vectors.");
-    }
-
-    const payload = checks.map((check, index) => ({
-      id: check.id,
-      values: vectors[index],
-      metadata: {
-        check_id: check.id,
-        category: check.category,
-        source_type: check.source_type || "WSHC_DERIVED",
-      },
-    }));
-
-    const result: any = await env.VECTORIZE.upsert(payload as any);
-
-    return jsonResponse({
-      ok: true,
-      message: "Safety checks successfully indexed into Vectorize.",
-      index: "safety-checks",
-      embedding_model: EMBEDDING_MODEL,
-      dimensions: VECTOR_DIMENSIONS,
-      indexed: checks.length,
-      ids: checks.map(c => c.id),
-      mutation: result,
-    });
-  } catch (error) {
-    return jsonResponse({
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-    }, 500);
-  }
-}
-
-type SeedTuple = [
-  string,
-  string,
-  string,
-  string,
-  CheckType,
-  Risk,
-  string,
-  string,
-  SourceType
-];
-
-/* Detailed checklist seed. These are WSHC-derived operational prompts.
- * Keep the source URL attached to every item so the UI can trace the guidance.
- */
-const CHECKLIST_SEED: SeedTuple[] = [
-  // PPE
-  ["ppe-visual-001","ppe-001","GENERAL","Required head protection appears to be worn correctly.","VISUAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
-  ["ppe-visual-002","ppe-001","GENERAL","High-visibility clothing appears to be worn where the work environment requires visibility.","VISUAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
-  ["ppe-physical-001","ppe-001","GENERAL","PPE is suitable for the identified task and hazard.","PHYSICAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
-  ["ppe-physical-002","ppe-001","GENERAL","PPE is clean, serviceable and correctly fitted.","PHYSICAL","MEDIUM","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
-
-  // Housekeeping
-  ["house-visual-001","house-001","GENERAL","Walking and working areas are visibly free of unnecessary obstruction.","VISUAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
-  ["house-visual-002","house-001","GENERAL","No visible oil, water, waste or loose materials create a slip or trip hazard.","VISUAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
-  ["house-physical-001","house-001","GENERAL","Waste is segregated and disposed of according to workplace arrangements.","PHYSICAL","MEDIUM","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
-  ["house-physical-002","house-002","GENERAL","Emergency access, exits and firefighting equipment are kept clear.","PHYSICAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
-
-  // Vehicular
-  ["veh-visual-001","veh-001","VEHICLE","Vehicle and pedestrian routes appear clearly separated where required.","VISUAL","HIGH","WSHC Vehicular Safety","https://www.tal.sg/wshc/topics/vehicular-safety","WSHC_DIRECT"],
-  ["veh-visual-002","veh-002","VEHICLE","Traffic signs, barriers and demarcation appear visible and unobstructed.","VISUAL","HIGH","WSHC Vehicular Safety","https://www.tal.sg/wshc/topics/vehicular-safety","WSHC_DIRECT"],
-  ["veh-physical-001","veh-001","VEHICLE","Vehicle movement controls and designated routes are implemented.","PHYSICAL","HIGH","WSHC Vehicular Safety","https://www.tal.sg/wshc/topics/vehicular-safety","WSHC_DIRECT"],
-  ["veh-physical-002","veh-003","VEHICLE","Reversing controls, banksman arrangements and visibility controls are verified where applicable.","PHYSICAL","HIGH","WSHC Vehicular Safety","https://www.tal.sg/wshc/topics/vehicular-safety","WSHC_DIRECT"],
-
-  // Lifting
-  ["lifting-visual-001","lifting-001","LIFTING_GEAR","Lifting gear, hooks, slings or spreader components show no obvious damage.","VISUAL","HIGH","WSHC Lifting","https://www.tal.sg/wshc/topics/lifting-operations","WSHC_DIRECT"],
-  ["lifting-visual-002","lifting-001","LIFTING_GEAR","People are not visibly positioned within an obvious suspended-load danger area.","VISUAL","HIGH","WSHC Lifting","https://www.tal.sg/wshc/topics/lifting-operations","WSHC_DIRECT"],
-  ["lifting-physical-001","lifting-001","LIFTING_GEAR","Safe Working Load and equipment suitability are verified before lifting.","PHYSICAL","HIGH","WSHC Lifting","https://www.tal.sg/wshc/topics/lifting-operations","WSHC_DIRECT"],
-  ["lifting-physical-002","lifting-001","LIFTING_GEAR","Lifting accessories have valid inspection and certification status.","PHYSICAL","HIGH","WSHC Lifting","https://www.tal.sg/wshc/topics/lifting-operations","WSHC_DIRECT"],
-
-  // Work at Height
-  ["wah-visual-001","work-height-001","MOBILE_ACCESS_PLATFORM","Open edges are protected by effective guardrails or barriers.","VISUAL","HIGH","WSHC Preventing Falls from Height","https://www.tal.sg/wshc/topics/work-at-height/preventing-falls-from-heights","WSHC_DIRECT"],
-  ["wah-visual-002","work-height-001","MOBILE_ACCESS_PLATFORM","Platform and structural members show no obvious cracks, bends or serious corrosion.","VISUAL","HIGH","WSHC Preventing Falls from Height","https://www.tal.sg/wshc/topics/work-at-height/preventing-falls-from-heights","WSHC_DERIVED"],
-  ["wah-visual-003","work-height-001","LADDER","Ladder appears free from obvious defects and is positioned securely.","VISUAL","HIGH","WSHC Preventing Falls from Height","https://www.tal.sg/wshc/topics/work-at-height/preventing-falls-from-heights","WSHC_DERIVED"],
-  ["wah-physical-001","work-height-001","MOBILE_ACCESS_PLATFORM","Guardrails, mid-rails and toe-boards are securely fixed.","PHYSICAL","HIGH","WSHC Preventing Falls from Height","https://www.tal.sg/wshc/topics/work-at-height/preventing-falls-from-heights","WSHC_DIRECT"],
-  ["wah-physical-002","work-height-001","MOBILE_ACCESS_PLATFORM","Wheels or castors are locked and the structure is stable before use.","PHYSICAL","HIGH","WSHC Preventing Falls from Height","https://www.tal.sg/wshc/topics/work-at-height/preventing-falls-from-heights","WSHC_DERIVED"],
-  ["wah-physical-003","work-height-001","MOBILE_ACCESS_PLATFORM","Inspection or tagging status is verified before use.","PHYSICAL","HIGH","WSHC Preventing Falls from Height","https://www.tal.sg/wshc/topics/work-at-height/preventing-falls-from-heights","WSHC_DERIVED"],
-  ["wah-physical-004","work-height-001","LADDER","Stable and level ground, safe access and three-point contact requirements are verified.","PHYSICAL","HIGH","WSHC Preventing Falls from Height","https://www.tal.sg/wshc/topics/work-at-height/preventing-falls-from-heights","WSHC_DERIVED"],
-  ["wah-ladder-visual-001","work-height-001","LADDER","Ladder rungs, stiles and feet show no obvious damage, excessive wear or missing components.","VISUAL","HIGH","WSHC Safe Use of Ladders Checklist","https://www.tal.sg/wshc/topics/work-at-height","WSHC_DERIVED"],
-  ["wah-ladder-visual-002","work-height-001","LADDER","Ladder is free from obvious oil, grease, mud or other conditions that could cause slipping.","VISUAL","HIGH","WSHC Safe Use of Ladders Checklist","https://www.tal.sg/wshc/topics/work-at-height","WSHC_DERIVED"],
-  ["wah-ladder-visual-003","work-height-001","LADDER","Ladder is positioned to provide safe access and is not visibly placed on an unstable support.","VISUAL","HIGH","WSHC Safe Use of Ladders Checklist","https://www.tal.sg/wshc/topics/work-at-height","WSHC_DERIVED"],
-  ["wah-ladder-physical-001","work-height-001","LADDER","Ladder is secured against slipping, sliding or overturning before use.","PHYSICAL","HIGH","WSHC Safe Use of Ladders Checklist","https://www.tal.sg/wshc/topics/work-at-height","WSHC_DERIVED"],
-  ["wah-ladder-physical-002","work-height-001","LADDER","Worker maintains three-point contact when climbing or working from the ladder.","PHYSICAL","HIGH","WSHC Safe Use of Ladders Checklist","https://www.tal.sg/wshc/topics/work-at-height","WSHC_DERIVED"],
-  ["wah-ladder-physical-003","work-height-001","LADDER","Worker does not stand on the top rung or otherwise use the ladder beyond its safe working limits.","PHYSICAL","HIGH","WSHC Safe Use of Ladders Checklist","https://www.tal.sg/wshc/topics/work-at-height","WSHC_DERIVED"],
-  ["wah-ladder-physical-004","work-height-001","LADDER","Ladder is suitable for the task and the worker can maintain a safe handhold and footing.","PHYSICAL","HIGH","WSHC Safe Use of Ladders Checklist","https://www.tal.sg/wshc/topics/work-at-height","WSHC_DERIVED"],
-
-  ["wah-visual-004","work-height-001","SCAFFOLD","Scaffold components, working platforms and guardrails show no obvious damage or missing sections.","VISUAL","HIGH","WSHC Preventing Falls from Height","https://www.tal.sg/wshc/topics/work-at-height/preventing-falls-from-heights","WSHC_DIRECT"],
-  ["wah-physical-005","work-height-001","SCAFFOLD","Scaffold stability, access, guardrails and inspection/tagging status are verified before use.","PHYSICAL","HIGH","WSHC Preventing Falls from Height","https://www.tal.sg/wshc/topics/work-at-height/preventing-falls-from-heights","WSHC_DIRECT"],
-  ["wah-physical-006","work-height-001","GENERAL","Safe access and egress, fall prevention and safe work procedures are verified for the work-at-height activity.","PHYSICAL","HIGH","WSHC Preventing Falls from Height","https://www.tal.sg/wshc/topics/work-at-height/preventing-falls-from-heights","WSHC_DIRECT"],
-
-  // Chemical
-  ["chem-visual-001","chemical-001","CHEMICAL","Chemical containers appear closed, intact and appropriately labelled.","VISUAL","HIGH","WSHC Preventing Chemical Hazards","https://www.tal.sg/wshc/topics/chemicals/preventing-chemical-hazards","WSHC_DIRECT"],
-  ["chem-visual-002","chemical-001","CHEMICAL","No obvious chemical leakage or uncontrolled spill is visible.","VISUAL","HIGH","WSHC Preventing Chemical Hazards","https://www.tal.sg/wshc/topics/chemicals/preventing-chemical-hazards","WSHC_DIRECT"],
-  ["chem-physical-001","chemical-001","CHEMICAL","Safety Data Sheet and chemical hazard information are available to workers.","PHYSICAL","HIGH","WSHC Preventing Chemical Hazards","https://www.tal.sg/wshc/topics/chemicals/preventing-chemical-hazards","WSHC_DIRECT"],
-  ["chem-physical-002","chemical-001","CHEMICAL","Chemical storage, segregation and emergency controls are verified.","PHYSICAL","HIGH","WSHC Preventing Chemical Hazards","https://www.tal.sg/wshc/topics/chemicals/preventing-chemical-hazards","WSHC_DIRECT"],
-
-  // Confined Space
-  ["conf-visual-001","confined-001","GENERAL","Confined-space entry points are identified and access is controlled.","VISUAL","HIGH","WSHC Confined Space resources","https://www.tal.sg/wshc/topics/confined-space","WSHC_DERIVED"],
-  ["conf-visual-002","confined-001","GENERAL","Warning signage and barriers are visible where required.","VISUAL","HIGH","WSHC Confined Space resources","https://www.tal.sg/wshc/topics/confined-space","WSHC_DERIVED"],
-  ["conf-physical-001","confined-001","GENERAL","Entry permit and risk assessment are verified before entry.","PHYSICAL","HIGH","WSHC Confined Space resources","https://www.tal.sg/wshc/topics/confined-space","WSHC_DERIVED"],
-  ["conf-physical-002","confined-001","GENERAL","Atmospheric testing, ventilation, attendant and rescue arrangements are verified where applicable.","PHYSICAL","HIGH","WSHC Confined Space resources","https://www.tal.sg/wshc/topics/confined-space","WSHC_DERIVED"],
-
-  // Electrical
-  ["elec-visual-001","electrical-001","ELECTRICAL_TOOL","Electrical cords, plugs and equipment show no obvious damage or exposed conductors.","VISUAL","HIGH","WSHC Electrical Safety","https://www.tal.sg/wshc/topics/electrical-safety/electrical-safety","WSHC_DIRECT"],
-  ["elec-visual-002","electrical-001","ELECTRICAL_TOOL","Electrical equipment is kept away from visible wet or damp conditions.","VISUAL","HIGH","WSHC Electrical Safety","https://www.tal.sg/wshc/topics/electrical-safety/electrical-safety","WSHC_DIRECT"],
-  ["elec-physical-001","electrical-001","ELECTRICAL_TOOL","Equipment grounding and suitability of the electrical connection are verified.","PHYSICAL","HIGH","WSHC Electrical Safety","https://www.tal.sg/wshc/topics/electrical-safety/electrical-safety","WSHC_DIRECT"],
-  ["elec-physical-002","electrical-001","ELECTRICAL_TOOL","LOTO is implemented for applicable maintenance or repair work.","PHYSICAL","HIGH","WSHC Electrical Safety","https://www.tal.sg/wshc/topics/electrical-safety/electrical-safety","WSHC_DIRECT"],
-
-  // Fire
-  ["fire-visual-001","fire-001","GENERAL","Fire extinguishers and fire equipment are accessible and not visibly obstructed.","VISUAL","HIGH","WSHC Fire Safety resources","https://www.tal.sg/wshc/-/media/tal/wshc/resources/publications/checklists-and-articles/files/managing-fire-risks-and-hazards-in-buildings.pdf","WSHC_DERIVED"],
-  ["fire-visual-002","fire-001","HOT_WORK","Combustible materials are not visibly exposed to sparks or hot-work activity.","VISUAL","HIGH","WSHC Fire Safety resources","https://www.tal.sg/wshc/-/media/tal/wshc/resources/publications/checklists-and-articles/files/managing-fire-risks-and-hazards-in-buildings.pdf","WSHC_DERIVED"],
-  ["fire-physical-001","fire-001","GENERAL","Fire extinguisher inspection/status is verified.","PHYSICAL","HIGH","WSHC Fire Safety resources","https://www.tal.sg/wshc/-/media/tal/wshc/resources/publications/checklists-and-articles/files/managing-fire-risks-and-hazards-in-buildings.pdf","WSHC_DERIVED"],
-  ["fire-physical-002","fire-001","HOT_WORK","Hot-work permit and fire-watch arrangements are verified where applicable.","PHYSICAL","HIGH","WSHC Fire Safety resources","https://www.tal.sg/wshc/-/media/tal/wshc/resources/publications/checklists-and-articles/files/managing-fire-risks-and-hazards-in-buildings.pdf","WSHC_DERIVED"],
-
-  // Forklift
-  ["fork-visual-001","forklift-001","FORKLIFT","Forks, tyres and visible forklift components show no obvious damage.","VISUAL","HIGH","WSHC Operating Forklifts Safely","https://www.tal.sg/wshc/topics/forklift/operating-forklifts-safely","WSHC_DIRECT"],
-  ["fork-visual-002","forklift-001","FORKLIFT","Seat belt and visible warning devices appear present.","VISUAL","HIGH","WSHC Operating Forklifts Safely","https://www.tal.sg/wshc/topics/forklift/operating-forklifts-safely","WSHC_DIRECT"],
-  ["fork-physical-001","forklift-001","FORKLIFT","Controls, steering, tyres, foot brake, lights, mirror and reverse warning buzzer are checked before operation.","PHYSICAL","HIGH","WSHC Operating Forklifts Safely","https://www.tal.sg/wshc/topics/forklift/operating-forklifts-safely","WSHC_DIRECT"],
-  ["fork-physical-002","forklift-001","FORKLIFT","Operator authorisation, training and seat-belt use are verified.","PHYSICAL","HIGH","WSHC Operating Forklifts Safely","https://www.tal.sg/wshc/topics/forklift/operating-forklifts-safely","WSHC_DIRECT"],
-
-  // Hot work
-  ["hot-visual-001","hot-work-001","WELDING","Welding, cutting or grinding sparks are contained away from combustible materials.","VISUAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
-  ["hot-visual-002","hot-work-001","WELDING","Gas cylinders, hoses and regulators show no obvious damage or unsafe placement.","VISUAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
-  ["hot-physical-001","hot-work-001","WELDING","Hot-work permit and fire-watch requirements are verified where applicable.","PHYSICAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
-  ["hot-physical-002","hot-work-001","WELDING","Gas cylinders are secured upright and separated/handled according to workplace controls.","PHYSICAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
-
-  // Loading
-  ["load-visual-001","loading-001","VEHICLE","Cargo appears stable and not obviously top-heavy or unsecured.","VISUAL","HIGH","WSHC Loading and Unloading Operations","https://www.tal.sg/wshc/topics/vehicular-safety/loading-and-unloading-operations","WSHC_DIRECT"],
-  ["load-visual-002","loading-001","VEHICLE","Loading/unloading area appears designated and free of unnecessary obstruction.","VISUAL","HIGH","WSHC Loading and Unloading Operations","https://www.tal.sg/wshc/topics/vehicular-safety/loading-and-unloading-operations","WSHC_DIRECT"],
-  ["load-physical-001","loading-001","VEHICLE","Parking brake, wheel chocks and vehicle stability controls are verified.","PHYSICAL","HIGH","WSHC Loading and Unloading Operations","https://www.tal.sg/wshc/topics/vehicular-safety/loading-and-unloading-operations","WSHC_DIRECT"],
-  ["load-physical-002","loading-001","VEHICLE","Cargo securing, lashing/dunnage and safe access/egress are verified.","PHYSICAL","HIGH","WSHC Loading and Unloading Operations","https://www.tal.sg/wshc/topics/vehicular-safety/loading-and-unloading-operations","WSHC_DIRECT"],
-
-  // Machinery
-  ["mach-visual-001","machinery-001","GENERAL","Machine guards appear present and moving parts are not visibly exposed.","VISUAL","HIGH","WSHC Preventing Machine Hazards","https://www.tal.sg/wshc/topics/machinery-safety/preventing-machine-hazards","WSHC_DIRECT"],
-  ["mach-visual-002","machinery-001","GENERAL","Machine shows no obvious abnormal damage or unsafe condition.","VISUAL","HIGH","WSHC Preventing Machine Hazards","https://www.tal.sg/wshc/topics/machinery-safety/preventing-machine-hazards","WSHC_DIRECT"],
-  ["mach-physical-001","machinery-001","GENERAL","Emergency stop and guarding arrangements are verified before use.","PHYSICAL","HIGH","WSHC Preventing Machine Hazards","https://www.tal.sg/wshc/topics/machinery-safety/preventing-machine-hazards","WSHC_DIRECT"],
-  ["mach-physical-002","machinery-001","GENERAL","LOTO and preventive maintenance arrangements are verified for applicable maintenance work.","PHYSICAL","HIGH","WSHC Preventing Machine Hazards","https://www.tal.sg/wshc/topics/machinery-safety/preventing-machine-hazards","WSHC_DIRECT"],
-
-  // Manual handling / ergonomics
-  ["erg-visual-001","ergonomics-001","GENERAL","Task shows no obvious excessive reaching, twisting or awkward lifting posture.","VISUAL","MEDIUM","WSHC Workplace Ergonomics","https://www.tal.sg/wshc/topics/ergonomics/about-workplace-ergonomics","WSHC_DIRECT"],
-  ["erg-visual-002","ergonomics-001","GENERAL","Load appears manageable or mechanical assistance is visibly used where appropriate.","VISUAL","MEDIUM","WSHC Workplace Ergonomics","https://www.tal.sg/wshc/topics/ergonomics/about-workplace-ergonomics","WSHC_DIRECT"],
-  ["erg-physical-001","ergonomics-001","GENERAL","Load weight, handling frequency and task demands are assessed.","PHYSICAL","MEDIUM","WSHC Workplace Ergonomics","https://www.tal.sg/wshc/topics/ergonomics/about-workplace-ergonomics","WSHC_DIRECT"],
-  ["erg-physical-002","ergonomics-001","GENERAL","Mechanical aids or team lifting are used when the load/task requires them.","PHYSICAL","HIGH","WSHC Workplace Ergonomics","https://www.tal.sg/wshc/topics/ergonomics/about-workplace-ergonomics","WSHC_DIRECT"],
-
-  // Noise
-  ["noise-visual-001","noise-001","GENERAL","Visible high-noise equipment/activity is identified for assessment.","VISUAL","MEDIUM","WSHC Noise","https://www.tal.sg/wshc/topics/noise","WSHC_DIRECT"],
-  ["noise-physical-001","noise-001","GENERAL","Noise exposure is assessed where workers may be exposed to hazardous noise.","PHYSICAL","HIGH","WSHC Noise","https://www.tal.sg/wshc/topics/noise","WSHC_DIRECT"],
-  ["noise-physical-002","noise-001","GENERAL","Hearing protection and hearing conservation controls are implemented where required.","PHYSICAL","HIGH","WSHC Noise","https://www.tal.sg/wshc/topics/noise","WSHC_DIRECT"],
-
-  // Reach stacker
-  ["rs-visual-001","reach-stacker-001","REACH_STACKER","Tyres, spreader and visible structural components show no obvious damage.","VISUAL","HIGH","WSHC Vehicular Safety","https://www.tal.sg/wshc/topics/vehicular-safety","WSHC_DIRECT"],
-  ["rs-visual-002","reach-stacker-001","REACH_STACKER","Warning lights, alarms and visibility aids appear present.","VISUAL","HIGH","WSHC Vehicular Safety","https://www.tal.sg/wshc/topics/vehicular-safety","WSHC_DERIVED"],
-  ["rs-physical-001","reach-stacker-001","REACH_STACKER","Pre-operation inspection, brakes, steering, alarms and controls are verified.","PHYSICAL","HIGH","WSHC Vehicular Safety","https://www.tal.sg/wshc/topics/vehicular-safety","WSHC_DERIVED"],
-  ["rs-physical-002","reach-stacker-001","REACH_STACKER","Spreader locking, load limits and operator authorisation are verified.","PHYSICAL","HIGH","WSHC Vehicular Safety","https://www.tal.sg/wshc/topics/vehicular-safety","WSHC_DERIVED"],
-
-  // Risk assessment
-  ["risk-visual-001","risk-001","GENERAL","Work activity has visible controls consistent with the identified hazards.","VISUAL","MEDIUM","WSHC Risk Management","https://www.tal.sg/wshc/topics/risk-management","WSHC_DIRECT"],
-  ["risk-physical-001","risk-001","GENERAL","Risk assessment covers the activity and significant hazards.","PHYSICAL","HIGH","WSHC Risk Management","https://www.tal.sg/wshc/topics/risk-management","WSHC_DIRECT"],
-  ["risk-physical-002","risk-001","GENERAL","Safe work procedures and worker communication are verified.","PHYSICAL","HIGH","WSHC Risk Management","https://www.tal.sg/wshc/topics/risk-management","WSHC_DIRECT"],
-
-  // Slips/trips/falls
-  ["stf-visual-001","sliptrip-001","GENERAL","Floor and walking surfaces appear free of visible spill, debris and trip hazards.","VISUAL","HIGH","WSHC Slips, Trips and Falls resources","https://www.tal.sg/wshc/topics/slips-trips-and-falls","WSHC_DIRECT"],
-  ["stf-visual-002","sliptrip-001","GENERAL","Cables, hoses and temporary items do not visibly obstruct walkways.","VISUAL","HIGH","WSHC Slips, Trips and Falls resources","https://www.tal.sg/wshc/topics/slips-trips-and-falls","WSHC_DIRECT"],
-  ["stf-physical-001","sliptrip-001","GENERAL","Floor condition, drainage and housekeeping controls are verified.","PHYSICAL","HIGH","WSHC Slips, Trips and Falls resources","https://www.tal.sg/wshc/topics/slips-trips-and-falls","WSHC_DIRECT"],
-
-  // Storage
-  ["store-visual-001","storage-001","GENERAL","Stored materials appear stable and not visibly leaning or at risk of toppling.","VISUAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
-  ["store-visual-002","storage-001","GENERAL","Aisles and access routes are visibly clear.","VISUAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
-  ["store-physical-001","storage-001","GENERAL","Storage arrangement, stack height and load limits are verified.","PHYSICAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
-  ["store-physical-002","storage-001","GENERAL","Damaged pallets, racks or storage equipment are removed or controlled.","PHYSICAL","HIGH","WSHC Workplace Safety and Health resources","https://www.tal.sg/wshc/resources","WSHC_DERIVED"],
-];
-
-async function seedChecklist(request: Request, env: Env): Promise<Response> {
-  try {
-    requireSeedKey(request, env);
-    await ensureChecklistTable(env);
-
-    const safetyColumns = await getTableColumns(env.SAFETY_DB, "safety_checks");
-
-    const existingIds = await env.SAFETY_DB.prepare(
-      `SELECT id FROM safety_checks`
-    ).all<{ id: string }>();
-
-    const existing = new Set((existingIds.results || []).map(x => x.id));
-
-    const valid = (CHECKLIST_SEED as SeedTuple[]).filter(row => existing.has(row[1]));
-
-    if (!valid.length) {
-      return jsonResponse({
-        ok: false,
-        error: "No checklist seed records matched existing safety_checks IDs.",
-      }, 400);
-    }
-
-    const statements = valid.map(row =>
-      env.SAFETY_DB.prepare(`
-        INSERT OR REPLACE INTO safety_check_items
-        (id, safety_check_id, equipment_type, check_item, check_type, importance, source_title, source_url, source_type, active)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-      `).bind(...row)
-    );
-
-    await env.SAFETY_DB.batch(statements);
-
-    return jsonResponse({
-      ok: true,
-      message: "Detailed WSHC checklist items seeded successfully.",
-      indexed: valid.length,
-      categories: [...new Set(valid.map(row => row[1]))].length,
-      table: "safety_check_items",
-    });
-  } catch (error) {
-    return jsonResponse({
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-    }, 500);
-  }
-}
-
-async function api(request: Request, env: Env, url: URL): Promise<Response> {
-  const path = url.pathname;
-
-  if (request.method === "GET" && path === "/api/health") return health(env);
-
-  if (request.method === "POST" && (path === "/api/analyze" || path === "/api/analysis")) {
-    return analyze(request, env);
-  }
-
-  if (request.method === "GET" && path === "/api/inspections") return recentInspections(env);
-
-  if (request.method === "GET" && path.startsWith("/api/inspection/")) {
-    const id = decodeURIComponent(path.substring("/api/inspection/".length));
-    if (!id) return jsonResponse({ ok: false, error: "Missing inspection ID." }, 400);
-    return getInspection(env, id);
-  }
-
-  if (request.method === "GET" && path === "/api/safety-checks") return safetyChecks(env);
-
-  if (request.method === "GET" && path === "/api/checklist") return getChecklist(env, request);
-
-  if (request.method === "GET" && path === "/api/photo") {
-    const key = url.searchParams.get("key");
-    if (!key) return textResponse("Missing photo key.", 400);
-    return getPhoto(env, key);
-  }
-
-  if (request.method === "POST" && path === "/api/vectorize/seed") {
-    return seedVectorize(request, env);
-  }
-
-  if (request.method === "POST" && path === "/api/checklist/seed") {
-    return seedChecklist(request, env);
-  }
-
-  return jsonResponse({
-    ok: false,
-    error: "API endpoint not found.",
-    path,
-  }, 404);
-}
+  EMAIL: { send(message: any): Promise<any> };
+  APP_URL: string;
+  GOOGLE_CLIENT_ID: string;
+  GOOGLE_CLIENT_SECRET: string;
+  BOOTSTRAP_SUPER_ADMIN_EMAIL: string;
+  EMAIL_FROM: string;
+  ADMIN_NOTIFICATION_EMAIL: string;
+  SESSION_SECRET: string;
+}
+
+const COOKIE = "sir_session";
+const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
+const MAX_PHOTOS_PER_ITEM = 8;
+const ALLOWED_TYPES = new Set(["image/jpeg","image/png","image/webp","image/heic","image/heif"]);
+const FINDING_TYPES = new Set(["safe_good_practice","unsafe_act","unsafe_condition","improvement_opportunity"]);
+const ACTION_STATUSES = new Set(["closed","open","in_progress","ready_for_closure","closure_requested","rejected"]);
+
+function json(data: unknown, status=200, headers: Record<string,string>={}) {
+  return new Response(JSON.stringify(data), {status, headers: {"content-type":"application/json; charset=utf-8", ...headers}});
+}
+function bad(message:string,status=400){return json({error:message},status);}
+function esc(s:string){return s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]!));}
+function randomString(n=32){const a=new Uint8Array(n);crypto.getRandomValues(a);return btoa(String.fromCharCode(...a)).replace(/[+/=]/g,"").slice(0,n);}
+function base64url(bytes:ArrayBuffer|Uint8Array){const a=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes);let s="";for(const b of a)s+=String.fromCharCode(b);return btoa(s).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");}
+async function sha256(s:string){return crypto.subtle.digest("SHA-256",new TextEncoder().encode(s));}
+async function hmac(s:string,secret:string){return base64url(await crypto.subtle.sign("HMAC",await crypto.subtle.importKey("raw",new TextEncoder().encode(secret),{name:"HMAC",hash:"SHA-256"},false,["sign"]),new TextEncoder().encode(s)));}
+async function signSession(payload:any,secret:string){const body=base64url(new TextEncoder().encode(JSON.stringify(payload)));return `${body}.${await hmac(body,secret)}`;}
+async function readSession(request:Request,env:Env){
+  const raw=request.headers.get("Cookie")?.match(new RegExp(`${COOKIE}=([^;]+)`))?.[1]; if(!raw)return null;
+  const [body,sig]=raw.split("."); if(!body||!sig)return null;
+  if((await hmac(body,env.SESSION_SECRET))!==sig)return null;
+  try{const p=JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(body.replace(/-/g,"+").replace(/_/g,"/")),c=>c.charCodeAt(0))));if(p.exp<Date.now())return null;return p;}catch{return null;}
+}
+function cookie(value:string,maxAge:number){return `${COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;}
+async function pkce(){
+  const verifier=randomString(64); const challenge=base64url(await sha256(verifier)); return {verifier,challenge};
+}
+function redirect(url:string,headers:Record<string,string>={}){return new Response(null,{status:302,headers:{Location:url,...headers}});}
+async function currentUser(request:Request,env:Env){
+  const s=await readSession(request,env); if(!s)return null;
+  const u=await env.DB.prepare("SELECT * FROM users WHERE id=? AND active=1").bind(s.uid).first<any>();
+  return u||null;
+}
+function requireRole(user:any,roles:string[]){return user && roles.includes(user.role);}
+async function audit(env:Env,user:any,action:string,entityType:string,entityId:string,before:any=null,after:any=null){
+  await env.DB.prepare(`INSERT INTO audit_log(actor_user_id,actor_google_sub,actor_email,action,entity_type,entity_id,before_json,after_json)
+    VALUES(?,?,?,?,?,?,?,?)`).bind(user?.id||null,user?.google_sub||null,user?.email||null,action,entityType,entityId,before?JSON.stringify(before):null,after?JSON.stringify(after):null).run();
+}
+function reportNo(){const d=new Date();return `SIR-${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,"0")}${String(d.getUTCDate()).padStart(2,"0")}-${randomString(4).toUpperCase()}`;}
+async function sendEmail(env:Env,to:string,subject:string,text:string,html:string){
+  if(!env.EMAIL?.send)return;
+  try{await env.EMAIL.send({to,from:env.EMAIL_FROM,subject,text,html});}catch(e){console.error("email",e);}
+}
+function htmlPage(title:string,body:string){return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><link rel="stylesheet" href="/styles.css"></head><body>${body}</body></html>`;}
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    try {
-      if (request.method === "OPTIONS") {
-        return new Response(null, {
-          status: 204,
-          headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, X-Vectorize-Seed-Key",
-          },
-        });
-      }
-
-      const url = new URL(request.url);
-
-      if (url.pathname.startsWith("/api/")) {
-        return api(request, env, url);
-      }
-
-      try {
-        const asset = await env.ASSETS.fetch(request);
-        if (asset.status !== 404) return asset;
-      } catch {}
-
-      return new Response("Depot Safety AI is running.", {
-        status: 200,
-        headers: { "Content-Type": "text/plain; charset=utf-8" },
-      });
-    } catch (error) {
-      return jsonResponse({
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      }, 500);
-    }
-  },
+  async fetch(request:Request,env:Env):Promise<Response>{
+    const url=new URL(request.url);
+    try{
+      if(url.pathname.startsWith("/auth/")) return await auth(request,env,url);
+      if(url.pathname.startsWith("/api/")) return await api(request,env,url);
+      if(url.pathname==="/health") return json({ok:true,service:"sir"});
+      const asset=await env.ASSETS.fetch(request);
+      return asset.status===404 ? env.ASSETS.fetch(new Request(new URL("/",url),request)) : asset;
+    }catch(e){console.error(e);return bad("Internal server error",500);}
+  }
 } satisfies ExportedHandler<Env>;
+
+async function auth(request:Request,env:Env,url:URL){
+  if(url.pathname==="/auth/login"){
+    const {verifier,challenge}=await pkce(); const state=randomString(32),nonce=randomString(32);
+    await env.DB.prepare("INSERT INTO oauth_states(state,code_verifier,nonce,created_at) VALUES(?,?,?,?)").bind(state,verifier,nonce,Date.now()).run();
+    const p=new URLSearchParams({client_id:env.GOOGLE_CLIENT_ID,redirect_uri:`${env.APP_URL}/auth/callback`,response_type:"code",scope:"openid email profile",state,nonce,code_challenge:challenge,code_challenge_method:"S256",access_type:"online",prompt:"select_account"});
+    return redirect("https://accounts.google.com/o/oauth2/v2/auth?"+p);
+  }
+  if(url.pathname==="/auth/logout"){
+    return redirect("/",{"Set-Cookie":cookie("",0)});
+  }
+  if(url.pathname==="/auth/callback"){
+    const code=url.searchParams.get("code"),state=url.searchParams.get("state"); if(!code||!state)return bad("Missing OAuth response",400);
+    const st=await env.DB.prepare("SELECT * FROM oauth_states WHERE state=?").bind(state).first<any>(); if(!st)return bad("Invalid OAuth state",400);
+    await env.DB.prepare("DELETE FROM oauth_states WHERE state=?").bind(state).run();
+    const token=await fetch("https://oauth2.googleapis.com/token",{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({code,client_id:env.GOOGLE_CLIENT_ID,client_secret:env.GOOGLE_CLIENT_SECRET,redirect_uri:`${env.APP_URL}/auth/callback`,grant_type:"authorization_code",code_verifier:st.code_verifier})});
+    if(!token.ok)return bad("Google token exchange failed",401);
+    const tok=await token.json<any>(); const info=await fetch("https://openidconnect.googleapis.com/v1/userinfo",{headers:{Authorization:`Bearer ${tok.access_token}`}});
+    if(!info.ok)return bad("Google identity lookup failed",401);
+    const g=await info.json<any>(); const email=(g.email||"").toLowerCase();
+    if(!g.email_verified)return bad("Google email is not verified",403);
+    let user=await env.DB.prepare("SELECT * FROM users WHERE email=?").bind(email).first<any>();
+    if(!user && email===env.BOOTSTRAP_SUPER_ADMIN_EMAIL.toLowerCase()){
+      await env.DB.prepare("INSERT INTO users(google_sub,email,name,company,role,active) VALUES(?,?,?,?,?,1)").bind(g.sub,email,g.name||email,"PSA","super_admin").run();
+      user=await env.DB.prepare("SELECT * FROM users WHERE email=?").bind(email).first<any>();
+    }
+    if(!user || !user.active)return bad("Your Google account is not authorized for SIR.",403);
+    if(user.google_sub && user.google_sub!==g.sub)return bad("Google identity does not match the authorized SIR account.",403);
+    await env.DB.prepare("UPDATE users SET google_sub=?,name=?,last_login_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(g.sub,g.name||user.name,user.id).run();
+    const session=await signSession({uid:user.id,sub:g.sub,exp:Date.now()+8*60*60*1000},env.SESSION_SECRET);
+    return redirect("/",{"Set-Cookie":cookie(session,8*60*60)});
+  }
+  return bad("Not found",404);
+}
+
+async function api(request:Request,env:Env,url:URL){
+  const user=await currentUser(request,env);
+  const path=url.pathname;
+
+  if(path==="/api/me"){
+    return user?json({user:{id:user.id,email:user.email,name:user.name,company:user.company,role:user.role}}):json({user:null});
+  }
+  if(path==="/api/config"){
+    const [c,l,a]=await Promise.all([
+      env.DB.prepare("SELECT id,name FROM companies WHERE active=1 ORDER BY name").all(),
+      env.DB.prepare("SELECT id,name FROM locations WHERE active=1 ORDER BY name").all(),
+      env.DB.prepare("SELECT id,name FROM areas WHERE active=1 ORDER BY name").all()
+    ]);
+    return json({companies:c.results,locations:l.results,areas:a.results,findingTypes:[
+      ["safe_good_practice","Safe / Good Practice"],["unsafe_act","Unsafe Act"],["unsafe_condition","Unsafe Condition"],["improvement_opportunity","Improvement Opportunity"]
+    ]});
+  }
+  if(!user)return bad("Authentication required",401);
+
+  if(path==="/api/reports" && request.method==="GET"){
+    const isAdmin=requireRole(user,["admin","super_admin"]);
+    if(isAdmin){
+      const q=url.searchParams.get("q")||"",company=url.searchParams.get("company")||"",location=url.searchParams.get("location")||"",status=url.searchParams.get("status")||"";
+      let sql=`SELECT r.*,u.email AS owner_email,(SELECT COUNT(*) FROM inspection_items i WHERE i.report_id=r.id) item_count
+        FROM inspection_reports r JOIN users u ON u.id=r.created_by_user_id WHERE 1=1`;
+      const args:any[]=[];
+      if(q){sql+=" AND (r.report_no LIKE ? OR r.inspector_name LIKE ?)";args.push(`%${q}%`,`%${q}%`);}
+      if(company){sql+=" AND r.company=?";args.push(company);} if(location){sql+=" AND r.location=?";args.push(location);} if(status){sql+=" AND r.status=?";args.push(status);}
+      sql+=" ORDER BY r.created_at DESC LIMIT 200";
+      return json(await env.DB.prepare(sql).bind(...args).all());
+    }
+    return json(await env.DB.prepare(`SELECT r.*, (SELECT COUNT(*) FROM inspection_items i WHERE i.report_id=r.id) item_count
+      FROM inspection_reports r WHERE r.created_by_google_sub=? ORDER BY r.created_at DESC LIMIT 200`).bind(user.google_sub).all());
+  }
+
+  if(path==="/api/reports" && request.method==="POST"){
+    const body=await request.json<any>();
+    if(!body.inspection_date||!body.company||!body.location||!Array.isArray(body.items)||!body.items.length)return bad("Missing required inspection fields.");
+    for(const item of body.items){
+      if(!FINDING_TYPES.has(item.finding_type)||!item.area||!item.description)return bad("Each item needs Finding Type, Area and Description.");
+      if(item.finding_type!=="safe_good_practice" && (!item.corrective_action||!item.target_date))return bad("Corrective Action and Target Date are required for non-safe findings.");
+    }
+    const newReportNo=reportNo();
+    const ins=await env.DB.prepare(`INSERT INTO inspection_reports(report_no,inspection_date,inspector_name,company,location,created_by_user_id,created_by_google_sub,status)
+      VALUES(?,?,?,?,?,?,?,'submitted')`).bind(newReportNo,body.inspection_date,user.name,body.company,body.location,user.id,user.google_sub).run();
+    const reportId=Number(ins.meta.last_row_id);
+    for(let n=0;n<body.items.length;n++){
+      const x=body.items[n]; const safe=x.finding_type==="safe_good_practice";
+      const r=await env.DB.prepare(`INSERT INTO inspection_items(report_id,item_no,finding_type,area,description,immediate_action,corrective_action,responsible_company,responsible_user_id,responsible_person_name,target_date,remark,status)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(reportId,n+1,x.finding_type,x.area,x.description,x.immediate_action||null,safe?null:x.corrective_action||null,safe?null:x.responsible_company||null,safe?null:x.responsible_user_id||null,safe?null:x.responsible_person_name||null,safe?null:x.target_date||null,x.remark||null,safe?"closed":"open").run();
+      const itemId=Number(r.meta.last_row_id);
+      await audit(env,user,"CREATE_ITEM","inspection_item",String(itemId),null,x);
+    }
+    await audit(env,user,"SUBMIT_REPORT","inspection_report",String(reportId),null,{reportNo:newReportNo});
+    const unsafe=body.items.filter((x:any)=>x.finding_type!=="safe_good_practice").length;
+    await sendEmail(env,env.ADMIN_NOTIFICATION_EMAIL,`New Safety Inspection – ${newReportNo}`,
+      `A new safety inspection was submitted.\nReport: ${newReportNo}\nInspector: ${user.name}\nCompany: ${body.company}\nLocation: ${body.location}\nFindings: ${body.items.length}\nNon-safe findings: ${unsafe}\n`,
+      `<h2>New Safety Inspection</h2><p><b>${esc(newReportNo)}</b></p><p>Inspector: ${esc(user.name)}<br>Company: ${esc(body.company)}<br>Location: ${esc(body.location)}</p><p>Findings: ${body.items.length}<br>Non-safe findings: ${unsafe}</p>`);
+    return json({ok:true,reportId,reportNo:newReportNo});
+  }
+
+  const m=path.match(/^\/api\/reports\/(\d+)$/);
+  if(m && request.method==="GET"){
+    const id=Number(m[1]); const r=await env.DB.prepare("SELECT * FROM inspection_reports WHERE id=?").bind(id).first<any>(); if(!r)return bad("Report not found",404);
+    if(r.created_by_google_sub!==user.google_sub&&!requireRole(user,["admin","super_admin"]))return bad("Access denied",403);
+    const items=await env.DB.prepare("SELECT i.*,u.email AS responsible_email FROM inspection_items i LEFT JOIN users u ON u.id=i.responsible_user_id WHERE i.report_id=? ORDER BY i.item_no").bind(id).all();
+    const photos=await env.DB.prepare("SELECT id,item_id,photo_type,original_name,content_type,size_bytes,created_at,uploaded_by_user_id FROM photos WHERE report_id=? ORDER BY id").bind(id).all();
+    return json({report:r,items:items.results,photos:photos.results});
+  }
+
+  const pm=path.match(/^\/api\/photos\/(\d+)$/);
+  if(pm && request.method==="GET"){
+    const id=Number(pm[1]); const p=await env.DB.prepare("SELECT * FROM photos WHERE id=?").bind(id).first<any>(); if(!p)return bad("Photo not found",404);
+    const r=await env.DB.prepare("SELECT created_by_google_sub FROM inspection_reports WHERE id=?").bind(p.report_id).first<any>();
+    const allowed=r?.created_by_google_sub===user.google_sub||requireRole(user,["admin","super_admin"])||await env.DB.prepare("SELECT 1 FROM inspection_items WHERE id=? AND responsible_user_id=?").bind(p.item_id,user.id).first();
+    if(!allowed)return bad("Access denied",403);
+    const obj=await env.PHOTOS.get(p.r2_key); if(!obj)return bad("Photo missing",404);
+    return new Response(obj.body,{headers:{"content-type":p.content_type,"cache-control":"private, max-age=300"}});
+  }
+
+  const im=path.match(/^\/api\/items\/(\d+)\/update$/);
+  if(im && request.method==="POST"){
+    const itemId=Number(im[1]); const item=await env.DB.prepare("SELECT * FROM inspection_items WHERE id=?").bind(itemId).first<any>(); if(!item)return bad("Item not found",404);
+    const report=await env.DB.prepare("SELECT * FROM inspection_reports WHERE id=?").bind(item.report_id).first<any>();
+    const allowed=item.responsible_user_id===user.id||requireRole(user,["admin","super_admin"]);
+    if(!allowed)return bad("Only the assigned user or Admin can update this corrective action.",403);
+    if(item.finding_type==="safe_good_practice")return bad("Safe findings do not require corrective-action updates.");
+    const b=await request.json<any>(); if(!ACTION_STATUSES.has(b.status)||!b.remark)return bad("Status and update remark are required.");
+    const before={status:item.status}; await env.DB.prepare("UPDATE inspection_items SET status=? WHERE id=?").bind(b.status,itemId).run();
+    await env.DB.prepare("INSERT INTO action_updates(item_id,user_id,status,remark) VALUES(?,?,?,?)").bind(itemId,user.id,b.status,b.remark).run();
+    await audit(env,user,"UPDATE_ACTION","inspection_item",String(itemId),before,{status:b.status,remark:b.remark});
+    if(b.status==="closure_requested"){
+      await sendEmail(env,env.ADMIN_NOTIFICATION_EMAIL,`Closure Verification Required – ${report.report_no}`,
+        `Item ${item.item_no} has requested closure.\nUpdated by: ${user.name}\nRemark: ${b.remark}`,
+        `<h2>Closure Verification Required</h2><p>Report ${esc(report.report_no)}, Item ${item.item_no}</p><p>${esc(b.remark)}</p>`);
+    }
+    return json({ok:true});
+  }
+
+  const cm=path.match(/^\/api\/items\/(\d+)\/closure$/);
+  if(cm && request.method==="POST"){
+    if(!requireRole(user,["admin","super_admin"]))return bad("Admin access required",403);
+    const id=Number(cm[1]); const item=await env.DB.prepare("SELECT * FROM inspection_items WHERE id=?").bind(id).first<any>(); if(!item)return bad("Item not found",404);
+    const b=await request.json<any>(); if(!["approve","reject"].includes(b.decision))return bad("Invalid decision");
+    const newStatus=b.decision==="approve"?"closed":"rejected";
+    await env.DB.prepare("UPDATE inspection_items SET status=? WHERE id=?").bind(newStatus,id).run();
+    await audit(env,user,b.decision==="approve"?"APPROVE_CLOSURE":"REJECT_CLOSURE","inspection_item",String(id),{status:item.status},{status:newStatus,remark:b.remark||null});
+    const report=await env.DB.prepare("SELECT report_no FROM inspection_reports WHERE id=?").bind(item.report_id).first<any>();
+    await sendEmail(env,env.ADMIN_NOTIFICATION_EMAIL,`Safety Action ${newStatus.toUpperCase()} – ${report?.report_no||""}`,
+      `Item ${item.item_no}: ${newStatus}.\nAdmin: ${user.name}\n${b.remark||""}`,
+      `<h2>Safety Action ${esc(newStatus.toUpperCase())}</h2><p>Item ${item.item_no}</p><p>${esc(b.remark||"")}</p>`);
+    return json({ok:true,status:newStatus});
+  }
+
+  const um=path.match(/^\/api\/items\/(\d+)\/photos$/);
+  if(um && request.method==="POST"){
+    const itemId=Number(um[1]); const item=await env.DB.prepare("SELECT * FROM inspection_items WHERE id=?").bind(itemId).first<any>(); if(!item)return bad("Item not found",404);
+    const allowed=item.responsible_user_id===user.id||requireRole(user,["admin","super_admin"]);
+    if(!allowed)return bad("Only the assigned user or Admin can upload action photos.",403);
+    const form=await request.formData(); const file=form.get("file"); const photoType=String(form.get("photo_type")||"update");
+    if(!(file instanceof File))return bad("Photo file required"); if(!["update","closure"].includes(photoType))return bad("Invalid photo type");
+    if(file.size>MAX_PHOTO_BYTES)return bad("Photo exceeds 8 MB limit"); if(!ALLOWED_TYPES.has(file.type))return bad("Unsupported photo type");
+    const count=await env.DB.prepare("SELECT COUNT(*) n FROM photos WHERE item_id=? AND photo_type=?").bind(itemId,photoType).first<any>();
+    if(Number(count?.n||0)>=MAX_PHOTOS_PER_ITEM)return bad("Photo limit reached");
+    const key=`reports/${item.report_id}/items/${itemId}/${photoType}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g,"_")}`;
+    await env.PHOTOS.put(key,file.stream(),{httpMetadata:{contentType:file.type}});
+    await env.DB.prepare("INSERT INTO photos(report_id,item_id,photo_type,r2_key,original_name,content_type,size_bytes,uploaded_by_user_id) VALUES(?,?,?,?,?,?,?,?)")
+      .bind(item.report_id,itemId,photoType,key,file.name,file.type,file.size,user.id).run();
+    await audit(env,user,"UPLOAD_PHOTO","photo",key,null,{itemId,photoType});
+    return json({ok:true});
+  }
+
+  if(path==="/api/admin/users" && request.method==="GET"){
+    if(!requireRole(user,["admin","super_admin"]))return bad("Admin access required",403);
+    return json(await env.DB.prepare("SELECT id,email,name,company,role,active,created_at,last_login_at FROM users ORDER BY name").all());
+  }
+  if(path==="/api/admin/users" && request.method==="POST"){
+    if(!requireRole(user,["admin","super_admin"]))return bad("Admin access required",403);
+    const b=await request.json<any>(); if(!b.email||!b.name||!["inspector","action_user","admin","super_admin"].includes(b.role))return bad("Invalid user");
+    await env.DB.prepare("INSERT INTO users(email,name,company,role,active) VALUES(?,?,?,?,1)").bind(b.email.toLowerCase(),b.name,b.company||null,b.role).run();
+    await audit(env,user,"CREATE_USER","user",b.email,null,b); return json({ok:true});
+  }
+  const userm=path.match(/^\/api\/admin\/users\/(\d+)$/);
+  if(userm && request.method==="PATCH"){
+    if(!requireRole(user,["admin","super_admin"]))return bad("Admin access required",403);
+    const id=Number(userm[1]), b=await request.json<any>(); const target=await env.DB.prepare("SELECT * FROM users WHERE id=?").bind(id).first<any>(); if(!target)return bad("User not found",404);
+    if(user.role!=="super_admin" && b.role==="super_admin")return bad("Only Super Admin can grant Super Admin.",403);
+    if(target.role==="super_admin"&&b.active===0){
+      const c=await env.DB.prepare("SELECT COUNT(*) n FROM users WHERE role='super_admin' AND active=1").first<any>(); if(Number(c?.n||0)<=1)return bad("Cannot deactivate the last Super Admin.",400);
+    }
+    await env.DB.prepare("UPDATE users SET name=?,company=?,role=?,active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(b.name,target.company,b.role,Number(b.active),id).run();
+    await audit(env,user,"UPDATE_USER","user",String(id),target,b); return json({ok:true});
+  }
+
+  if(path==="/api/admin/settings" && request.method==="GET"){
+    if(!requireRole(user,["admin","super_admin"]))return bad("Admin access required",403);
+    const [companies,locations,areas]=await Promise.all([
+      env.DB.prepare("SELECT * FROM companies ORDER BY name").all(),
+      env.DB.prepare("SELECT * FROM locations ORDER BY name").all(),
+      env.DB.prepare("SELECT * FROM areas ORDER BY name").all()
+    ]); return json({companies:companies.results,locations:locations.results,areas:areas.results});
+  }
+  const sm=path.match(/^\/api\/admin\/settings\/(companies|locations|areas)$/);
+  if(sm && request.method==="POST"){
+    if(!requireRole(user,["admin","super_admin"]))return bad("Admin access required",403);
+    const table=sm[1],b=await request.json<any>(); if(!b.name)return bad("Name required");
+    await env.DB.prepare(`INSERT INTO ${table}(name,active,created_by) VALUES(?,?,?)`).bind(b.name.trim(),1,user.id).run();
+    await audit(env,user,"CREATE_SETTING",table,b.name,null,b); return json({ok:true});
+  }
+  const sx=path.match(/^\/api\/admin\/settings\/(companies|locations|areas)\/(\d+)$/);
+  if(sx && request.method==="PATCH"){
+    if(!requireRole(user,["admin","super_admin"]))return bad("Admin access required",403);
+    const table=sx[1],id=Number(sx[2]),b=await request.json<any>(); const old=await env.DB.prepare(`SELECT * FROM ${table} WHERE id=?`).bind(id).first<any>();
+    if(!old)return bad("Setting not found",404);
+    await env.DB.prepare(`UPDATE ${table} SET name=?,active=? WHERE id=?`).bind(b.name||old.name,Number(b.active),id).run();
+    await audit(env,user,"UPDATE_SETTING",table,String(id),old,b); return json({ok:true});
+  }
+  if(path==="/api/admin/audit" && request.method==="GET"){
+    if(!requireRole(user,["admin","super_admin"]))return bad("Admin access required",403);
+    return json(await env.DB.prepare("SELECT * FROM audit_log ORDER BY id DESC LIMIT 500").all());
+  }
+
+  return bad("API endpoint not found",404);
+}
